@@ -2,5 +2,10 @@ node_modules
 dist
 .env
 .env.local
+.env development.local
 *.log
 .DS_Store
+
+# Design folders (wireframes and artwork)
+Mid-Fi-WireFrames/
+Rental City _ Design/
