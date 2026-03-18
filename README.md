@@ -38,6 +38,8 @@ RentalCity/
 
 See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for full Supabase architecture, schema, and screen-mapped backend logic.
 
+A shareable architecture overview is also available as a PDF: [docs/ARCHITECTURE-SHARE.pdf](./docs/ARCHITECTURE-SHARE.pdf) (rendered from [docs/ARCHITECTURE-SHARE.md](./docs/ARCHITECTURE-SHARE.md)).
+
 ## Estimated Hours (from scope)
 
 | Area | Hours |
