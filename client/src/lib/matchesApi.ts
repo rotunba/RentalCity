@@ -1,0 +1,119 @@
+/**
+ * API client for server-side match score computation.
+ */
+
+export type MatchDimensions = {
+  affordability: number
+  stability: number
+  risk: number
+  lifestyle: number
+  policy: number
+}
+
+export type MatchResult = {
+  eligible: boolean
+  reasons: string[]
+  overall: number
+  dimensions: MatchDimensions
+  tenantScore?: number | null
+}
+
+export async function fetchMatchesForTenant(
+  accessToken: string,
+  tenantId: string,
+  propertyIds: string[],
+  options?: { limit?: number },
+): Promise<Record<string, MatchResult>> {
+  const res = await fetch('/api/matches/for-tenant', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({
+      tenantId,
+      propertyIds,
+      ...(options?.limit != null && options.limit > 0 ? { limit: options.limit } : {}),
+    }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error((err as { error?: string }).error || 'Failed to load match scores')
+  }
+  const data = await res.json() as { matches: Record<string, MatchResult> }
+  return data.matches ?? {}
+}
+
+export async function fetchMatchesForLandlord(
+  accessToken: string,
+  landlordId: string,
+  tenantIds: string[]
+): Promise<Record<string, MatchResult>> {
+  const res = await fetch('/api/matches/for-landlord', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({ landlordId, tenantIds }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error((err as { error?: string }).error || 'Failed to load match scores')
+  }
+  const data = await res.json() as { matches: Record<string, MatchResult & { tenantScore?: number | null }> }
+  return data.matches ?? {}
+}
+
+export type LandlordCatalogRow = {
+  propertyId: string
+  tenantId: string
+  match: MatchResult & { tenantScore?: number | null }
+  name: string
+  avatarUrl: string | null
+}
+
+export async function fetchLandlordMatchCatalog(
+  accessToken: string,
+  landlordId: string,
+  propertyIds: string[],
+  options?: { limitPerProperty?: number },
+): Promise<{ rows: LandlordCatalogRow[] }> {
+  const res = await fetch('/api/matches/landlord-catalog', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({
+      landlordId,
+      propertyIds,
+      ...(options?.limitPerProperty != null && options.limitPerProperty > 0
+        ? { limitPerProperty: options.limitPerProperty }
+        : {}),
+    }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error((err as { error?: string }).error || 'Failed to load match catalog')
+  }
+  return (await res.json()) as { rows: LandlordCatalogRow[] }
+}
+
+/** Landlord-only: universal application row when Supabase RPC/RLS misses match-catalog prospects. */
+export async function fetchLandlordTenantUniversalApplication(
+  accessToken: string,
+  tenantId: string,
+): Promise<{ universalApplication: unknown }> {
+  const res = await fetch(`/api/landlord/tenant-universal-application/${encodeURIComponent(tenantId)}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  })
+  if (res.status === 403) {
+    return { universalApplication: null }
+  }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error((err as { error?: string }).error || 'Failed to load universal application')
+  }
+  return (await res.json()) as { universalApplication: unknown }
+}

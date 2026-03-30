@@ -23,11 +23,32 @@ const supabase = createClient(url, serviceKey, { auth: { persistSession: false }
 
 const TEST_PASSWORD = 'TestPassword123!'
 
+/** Unsplash samples for landlord@test.rentalcity.com listings (main + extras by label). */
+const SAMPLE_PROPERTY_PHOTOS_BY_ADDRESS = {
+  '123 Oak Street, Apt 4B': [
+    'https://images.unsplash.com/photo-1568605114967-8130f3a36994?w=1200&h=800&fit=crop',
+    'https://images.unsplash.com/photo-1556911220-bff31c812dba?w=1200&h=800&fit=crop',
+    'https://images.unsplash.com/photo-1522771739844-6a9f6d5f14af?w=1200&h=800&fit=crop',
+  ],
+  '456 Pine Avenue, Unit 2A': [
+    'https://images.unsplash.com/photo-1600596542815-ffad4c1539a9?w=1200&h=800&fit=crop',
+  ],
+  '789 Maple Drive, Suite 1C': [
+    'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?w=1200&h=800&fit=crop',
+    'https://images.unsplash.com/photo-1502672260266-1c1ef2d93688?w=1200&h=800&fit=crop',
+  ],
+  '210 Birch Road, Unit 1': [
+    'https://images.unsplash.com/photo-1522708323590-d24dbb6b0267?w=1200&h=800&fit=crop',
+  ],
+}
+
 async function main() {
   console.log('Seeding dummy data...')
 
   // Create or get test users
   let landlordId, tenantId, declinedTenantId, lockedTenantId, unlockedTenantId
+  /** Extra tenant accounts so landlord@test can have many distinct ratings (unique per tenant_external_id). */
+  const ratingDemoTenants = []
 
   const { data: existingUsers } = await supabase.auth.admin.listUsers({ perPage: 100 })
   const landlordUser = existingUsers?.users?.find((u) => u.email === 'landlord@test.rentalcity.com')
@@ -129,6 +150,67 @@ async function main() {
     }
   }
 
+  const ratingDemoTenantSpecs = [
+    { email: 'ratingdemo1@test.rentalcity.com', display_name: 'Alex Kim' },
+    { email: 'ratingdemo2@test.rentalcity.com', display_name: 'Jordan Martinez' },
+    { email: 'ratingdemo3@test.rentalcity.com', display_name: 'Samira Okonkwo' },
+    { email: 'ratingdemo4@test.rentalcity.com', display_name: 'Taylor Brooks' },
+    { email: 'ratingdemo5@test.rentalcity.com', display_name: 'Riley Chen' },
+    { email: 'ratingdemo6@test.rentalcity.com', display_name: 'Casey Nguyen' },
+  ]
+  for (const spec of ratingDemoTenantSpecs) {
+    let u = existingUsers?.users?.find((x) => x.email === spec.email)
+    if (!u) {
+      const { data: created, error: te } = await supabase.auth.admin.createUser({
+        email: spec.email,
+        password: TEST_PASSWORD,
+        email_confirm: true,
+      })
+      if (te) {
+        console.warn(`Optional rating demo tenant ${spec.email}:`, te.message)
+        continue
+      }
+      u = created.user
+      console.log('Created rating demo tenant:', spec.email)
+    } else {
+      console.log('Rating demo tenant exists:', spec.email)
+    }
+    ratingDemoTenants.push({ id: u.id, display_name: spec.display_name })
+  }
+
+  // Extra landlord accounts so Test Tenant can show reviews from multiple landlords
+  const extraLandlordSpecs = [
+    { email: 'landlord2@test.rentalcity.com', display_name: 'Morgan Patel' },
+    { email: 'landlord3@test.rentalcity.com', display_name: 'Riverside Rentals LLC' },
+    { email: 'landlord4@test.rentalcity.com', display_name: 'Jordan Lee' },
+    { email: 'landlord5@test.rentalcity.com', display_name: 'Elena Vasquez' },
+    { email: 'landlord6@test.rentalcity.com', display_name: 'Northside Properties' },
+    { email: 'landlord7@test.rentalcity.com', display_name: 'Sam Okonkwo' },
+  ]
+  const extraLandlordProfileRows = []
+  /** Map email → auth user id (avoids stale listUsers when seeding reviews in the same run). */
+  const extraLandlordIdByEmail = new Map()
+  for (const spec of extraLandlordSpecs) {
+    let u = existingUsers?.users?.find((x) => x.email === spec.email)
+    if (!u) {
+      const { data: created, error: le } = await supabase.auth.admin.createUser({
+        email: spec.email,
+        password: TEST_PASSWORD,
+        email_confirm: true,
+      })
+      if (le) {
+        console.warn(`Optional landlord ${spec.email}:`, le.message)
+        continue
+      }
+      u = created.user
+      console.log('Created landlord:', spec.email)
+    } else {
+      console.log('Landlord user exists:', spec.email)
+    }
+    extraLandlordIdByEmail.set(spec.email, u.id)
+    extraLandlordProfileRows.push({ id: u.id, role: 'landlord', display_name: spec.display_name })
+  }
+
   // Ensure profiles exist
   const profileRows = [
     { id: landlordId, role: 'landlord', display_name: 'Test Landlord' },
@@ -143,6 +225,10 @@ async function main() {
   if (unlockedTenantId) {
     profileRows.push({ id: unlockedTenantId, role: 'tenant', display_name: 'Unlocked Tenant' })
   }
+  for (const t of ratingDemoTenants) {
+    profileRows.push({ id: t.id, role: 'tenant', display_name: t.display_name })
+  }
+  profileRows.push(...extraLandlordProfileRows)
   await supabase.from('profiles').upsert(profileRows, { onConflict: 'id' })
 
   // Properties
@@ -176,6 +262,7 @@ async function main() {
         title: '123 Oak Street, Apt 4B',
         amenities: ['pet_friendly', 'parking', 'laundry'],
         photo_labels: ['living_room', 'kitchen', 'bedroom'],
+        photo_urls: SAMPLE_PROPERTY_PHOTOS_BY_ADDRESS['123 Oak Street, Apt 4B'],
       })
       .select('id')
       .single()
@@ -202,6 +289,7 @@ async function main() {
         title: '456 Pine Avenue, Unit 2A',
         amenities: ['gym', 'balcony'],
         photo_labels: ['living_room'],
+        photo_urls: SAMPLE_PROPERTY_PHOTOS_BY_ADDRESS['456 Pine Avenue, Unit 2A'],
       },
       {
         landlord_id: landlordId,
@@ -217,8 +305,30 @@ async function main() {
         title: '789 Maple Drive, Suite 1C',
         amenities: ['pet_friendly', 'yard', 'parking'],
         photo_labels: ['living_room', 'bedroom'],
+        photo_urls: SAMPLE_PROPERTY_PHOTOS_BY_ADDRESS['789 Maple Drive, Suite 1C'],
       },
     ])
+  }
+
+  const { data: landlordPropsForPhotos } = await supabase
+    .from('properties')
+    .select('id, address_line1, photo_urls')
+    .eq('landlord_id', landlordId)
+
+  for (const row of landlordPropsForPhotos ?? []) {
+    const hasPhotos =
+      Array.isArray(row.photo_urls) &&
+      row.photo_urls.length > 0 &&
+      row.photo_urls.some((u) => u && String(u).trim() !== '')
+    if (hasPhotos) continue
+    const urls = SAMPLE_PROPERTY_PHOTOS_BY_ADDRESS[row.address_line1]
+    if (!urls?.length) continue
+    const { error: photoErr } = await supabase.from('properties').update({ photo_urls: urls }).eq('id', row.id)
+    if (photoErr) {
+      console.error(`Sample photos for ${row.address_line1}:`, photoErr.message)
+    } else {
+      console.log('Added sample photos:', row.address_line1)
+    }
   }
 
   // Applications
@@ -250,6 +360,139 @@ async function main() {
     }
     appId = a.id
     console.log('Created application:', appId)
+  }
+
+  // More matches for Test Tenant (same tenant, different listings — multiple accepted allowed)
+  const { data: landlordPropList } = await supabase
+    .from('properties')
+    .select('id, address_line1')
+    .eq('landlord_id', landlordId)
+
+  const propIdIncludes = (needle) =>
+    landlordPropList?.find((p) => String(p.address_line1 || '').includes(needle))?.id
+
+  const pineId = propIdIncludes('Pine')
+  const mapleId = propIdIncludes('Maple')
+
+  for (const { pid, message } of [
+    {
+      pid: pineId,
+      message: 'Interested in the Pine Avenue unit — quiet building preferred.',
+    },
+    {
+      pid: mapleId,
+      message: 'The Maple Drive listing looks great for our family.',
+    },
+  ].filter((x) => x.pid)) {
+    const { data: existsExtra } = await supabase
+      .from('applications')
+      .select('id')
+      .eq('tenant_id', tenantId)
+      .eq('property_id', pid)
+      .limit(1)
+    if (existsExtra?.length) continue
+    const { error: extraErr } = await supabase.from('applications').insert({
+      tenant_id: tenantId,
+      property_id: pid,
+      status: 'approved',
+      message,
+    })
+    if (extraErr) {
+      console.error('Extra Test Tenant application:', extraErr.message)
+    } else {
+      console.log('Created additional approved application for Test Tenant:', pid)
+    }
+  }
+
+  // Birch listing + Test Tenant: Matches card should show Approve/Decline (pending + unlocked_at), not only "Unlock".
+  // Declined-filter demos use `declinedTenantId` on the main seed property instead.
+  const birchIdExisting = landlordPropList?.find((p) =>
+    String(p.address_line1 || '').includes('Birch'),
+  )?.id
+  let birchPropertyId = birchIdExisting ?? null
+  if (!birchPropertyId) {
+    const { data: birchRow, error: birchErr } = await supabase
+      .from('properties')
+      .insert({
+        landlord_id: landlordId,
+        address_line1: '210 Birch Road, Unit 1',
+        city: 'Rochester',
+        state: 'NY',
+        postal_code: '14616',
+        country: 'US',
+        bedrooms: 1,
+        bathrooms: 1,
+        sqft: 640,
+        monthly_rent_cents: 110000,
+        deposit_cents: 220000,
+        status: 'active',
+        title: '210 Birch Road, Unit 1',
+        amenities: ['laundry'],
+        photo_labels: ['living_room'],
+        photo_urls: SAMPLE_PROPERTY_PHOTOS_BY_ADDRESS['210 Birch Road, Unit 1'],
+      })
+      .select('id')
+      .single()
+    if (birchErr) {
+      console.error('Birch property (Test Tenant matches demo):', birchErr.message)
+    } else if (birchRow) {
+      birchPropertyId = birchRow.id
+      console.log('Created Birch property for Test Tenant matches demo:', birchPropertyId)
+    }
+  }
+  if (birchPropertyId && tenantId) {
+    const nowIso = new Date().toISOString()
+    const { data: birchApps, error: birchAppsErr } = await supabase
+      .from('applications')
+      .select('id, status, unlocked_at, created_at')
+      .eq('tenant_id', tenantId)
+      .eq('property_id', birchPropertyId)
+      .order('created_at', { ascending: false })
+
+    if (birchAppsErr) {
+      console.error('Birch Test Tenant applications:', birchAppsErr.message)
+    } else if (!birchApps?.length) {
+      const { error: insErr } = await supabase.from('applications').insert({
+        tenant_id: tenantId,
+        property_id: birchPropertyId,
+        status: 'pending',
+        unlocked_at: nowIso,
+        message: 'Interested in this Birch unit — flexible move-in.',
+      })
+      if (insErr) {
+        console.error('Birch Test Tenant application insert:', insErr.message)
+      } else {
+        console.log('Created Birch Test Tenant application (pending + unlocked for Matches demo)')
+      }
+    } else {
+      const pending = birchApps.filter((a) => a.status === 'pending')
+      const hasUnlockedPending = pending.some((a) => a.unlocked_at != null && String(a.unlocked_at).trim() !== '')
+      if (hasUnlockedPending) {
+        console.log('Birch Test Tenant: unlocked pending application already present')
+      } else if (pending.length > 0) {
+        const target = pending[0]
+        const { error: upErr } = await supabase
+          .from('applications')
+          .update({ unlocked_at: nowIso })
+          .eq('id', target.id)
+        if (upErr) {
+          console.error('Birch Test Tenant unlock_at update:', upErr.message)
+        } else {
+          console.log('Set unlocked_at on Birch Test Tenant pending application:', target.id)
+        }
+      } else if (birchApps.every((a) => a.status === 'rejected')) {
+        const target = birchApps[0]
+        const { error: upErr } = await supabase
+          .from('applications')
+          .update({ status: 'pending', unlocked_at: nowIso })
+          .eq('id', target.id)
+        if (upErr) {
+          console.error('Birch Test Tenant rejected -> pending+unlocked:', upErr.message)
+        } else {
+          console.log('Upgraded Birch Test Tenant application to pending+unlocked (matches demo)')
+        }
+      }
+    }
   }
 
   // Declined-tenant application (rejected)
@@ -343,12 +586,12 @@ async function main() {
   ])
   console.log('Inserted notifications')
 
-  // Message threads and messages
+  // Message threads and messages (one thread per landlord–tenant pair)
   const { data: existingThreads } = await supabase
     .from('message_threads')
     .select('id')
     .eq('tenant_id', tenantId)
-    .eq('property_id', propertyId)
+    .eq('landlord_id', landlordId)
     .limit(1)
 
   if (!existingThreads?.length) {
@@ -376,6 +619,168 @@ async function main() {
       ])
       console.log('Created message thread and 5 messages')
     }
+  }
+
+  // Past-tenant reviews for Test Tenant (other landlords — idempotent upsert on landlord_id + tenant_external_id)
+  const reviewSeeds = [
+    {
+      email: 'landlord2@test.rentalcity.com',
+      property_name: 'Sunset Studios',
+      property_address: '400 Cedar Lane, Unit 5, Rochester, NY',
+      rating: 5,
+      comment: 'Excellent tenant — quiet, paid on time, and left the unit in great shape.',
+      created_at: '2025-10-18T14:30:00.000Z',
+    },
+    {
+      email: 'landlord3@test.rentalcity.com',
+      property_name: 'Riverside Commons',
+      property_address: '88 River Road, Apt 12, Buffalo, NY',
+      rating: 4,
+      comment: 'Professional and easy to work with. Minor wear at move-out but within normal range.',
+      created_at: '2025-11-22T11:00:00.000Z',
+    },
+    {
+      email: 'landlord4@test.rentalcity.com',
+      property_name: 'Market Street Lofts',
+      property_address: '12 Market Street, Floor 3, Rochester, NY',
+      rating: 5,
+      comment: 'Would happily rent to again. Clear communication throughout the lease.',
+      created_at: '2026-01-08T09:15:00.000Z',
+    },
+    {
+      email: 'landlord5@test.rentalcity.com',
+      property_name: 'Highland Row Townhomes',
+      property_address: '220 Highland Ave, Unit B, Rochester, NY',
+      rating: 4,
+      comment: null,
+      created_at: '2026-02-14T16:45:00.000Z',
+    },
+    {
+      email: 'landlord6@test.rentalcity.com',
+      property_name: 'Lakeside Court',
+      property_address: '9 Lakeside Court, Apt 2, Buffalo, NY',
+      rating: 3,
+      comment: 'Rent was always on time. A few noise complaints from neighbors in year two; we worked it out.',
+      created_at: '2026-02-28T13:20:00.000Z',
+    },
+    {
+      email: 'landlord7@test.rentalcity.com',
+      property_name: 'Elmwood Duplex',
+      property_address: '105 Elmwood Ave, Rochester, NY',
+      rating: 5,
+      comment: 'Spotless move-out and flexible on the final walkthrough. Highly recommend.',
+      created_at: '2026-03-09T18:00:00.000Z',
+    },
+  ]
+  for (const row of reviewSeeds) {
+    const reviewerId = extraLandlordIdByEmail.get(row.email)
+    if (!reviewerId) {
+      console.warn('Skipping tenant_ratings seed (landlord account missing):', row.email)
+      continue
+    }
+    const { error: trErr } = await supabase.from('tenant_ratings').upsert(
+      {
+        landlord_id: reviewerId,
+        tenant_id: tenantId,
+        tenant_external_id: tenantId,
+        tenant_name: 'Test Tenant',
+        property_name: row.property_name,
+        property_address: row.property_address,
+        rating: row.rating,
+        comment: row.comment,
+        created_at: row.created_at,
+      },
+      { onConflict: 'landlord_id,tenant_external_id' },
+    )
+    if (trErr) {
+      console.warn('tenant_ratings seed:', row.email, trErr.message)
+    } else {
+      console.log('Seeded review from', row.email)
+    }
+  }
+
+  // Ratings submitted by main test landlord (one per tenant_external_id)
+  const mainLandlordRatingSeeds = [
+    {
+      tenantId: tenantId,
+      tenant_name: 'Test Tenant',
+      property_name: '123 Oak Street, Apt 4B',
+      property_address: '123 Oak Street, Apt 4B, Rochester, NY 14616',
+      rating: 4,
+      comment: 'Very responsive tenant',
+      created_at: '2026-03-09T12:00:00.000Z',
+    },
+    {
+      tenantId: declinedTenantId,
+      tenant_name: 'Declined Tenant',
+      property_name: '456 Pine Avenue, Unit 2A',
+      property_address: '456 Pine Avenue, Unit 2A, Rochester, NY 14616',
+      rating: 3,
+      comment: 'Short stay; no major issues at move-out.',
+      created_at: '2026-02-20T10:30:00.000Z',
+    },
+    {
+      tenantId: lockedTenantId,
+      tenant_name: 'Locked Tenant',
+      property_name: '789 Maple Drive, Suite 1C',
+      property_address: '789 Maple Drive, Suite 1C, Buffalo, NY 14224',
+      rating: 5,
+      comment: 'Excellent communication and care for the unit.',
+      created_at: '2026-02-11T09:00:00.000Z',
+    },
+    {
+      tenantId: unlockedTenantId,
+      tenant_name: 'Unlocked Tenant',
+      property_name: '210 Birch Road, Unit 1',
+      property_address: '210 Birch Road, Unit 1, Rochester, NY 14616',
+      rating: 4,
+      comment: null,
+      created_at: '2026-01-28T16:15:00.000Z',
+    },
+    ...ratingDemoTenants.map((t, i) => {
+      const labels = [
+        ['Northside duplex', '88 Genesee Street, Unit A, Rochester, NY 14616', 5, 'Rent always on time; would rent again.'],
+        ['Canal loft', '12 Canal Park, Floor 4, Buffalo, NY 14202', 4, 'Minor wear at move-out, within expectations.'],
+        ['Parkside studio', '400 Broadway, Studio 7, Rochester, NY 14611', 5, 'Quiet neighbor; left the place spotless.'],
+        ['East ave flat', '1500 East Avenue, Apt 2, Rochester, NY 14610', 3, 'Several late rent notices; eventually caught up.'],
+        ['Summit townhome', '8 Summit Circle, Townhome C, Pittsford, NY 14534', 5, null],
+        ['Lake ave rental', '920 Lake Avenue, Lower, Rochester, NY 14613', 4, 'Good tenant overall; responsive to inspections.'],
+      ]
+      const [property_name, property_address, rating, comment] = labels[i] ?? labels[0]
+      const month = String(12 - Math.min(i, 5)).padStart(2, '0')
+      return {
+        tenantId: t.id,
+        tenant_name: t.display_name,
+        property_name,
+        property_address,
+        rating,
+        comment,
+        created_at: `2025-${month}-${String(15 - i).padStart(2, '0')}T14:00:00.000Z`,
+      }
+    }),
+  ].filter((r) => r.tenantId)
+
+  for (const row of mainLandlordRatingSeeds) {
+    const { error: trErr } = await supabase.from('tenant_ratings').upsert(
+      {
+        landlord_id: landlordId,
+        tenant_id: row.tenantId,
+        tenant_external_id: row.tenantId,
+        tenant_name: row.tenant_name,
+        property_name: row.property_name,
+        property_address: row.property_address,
+        rating: row.rating,
+        comment: row.comment,
+        created_at: row.created_at,
+      },
+      { onConflict: 'landlord_id,tenant_external_id' },
+    )
+    if (trErr) {
+      console.warn('tenant_ratings seed (main landlord):', row.tenant_name, trErr.message)
+    }
+  }
+  if (mainLandlordRatingSeeds.length) {
+    console.log('Seeded', mainLandlordRatingSeeds.length, 'reviews from landlord@test.rentalcity.com')
   }
 
   console.log('Seeding complete.')

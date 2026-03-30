@@ -16,8 +16,8 @@ export function RoleSelectionPage() {
     setLoading(true)
     await supabase.from('profiles').update({ role }).eq('id', user.id)
     setLoading(false)
-    // Tenants → rental needs; Landlords → profile
-    navigate(role === 'tenant' ? '/onboarding/rental-needs' : '/onboarding/profile')
+    // Tenants → rental needs in app shell; Landlords → profile setup
+    navigate(role === 'tenant' ? '/rental-needs' : '/onboarding/profile')
   }
 
   return (

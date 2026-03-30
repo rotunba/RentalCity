@@ -65,7 +65,7 @@ export const tenantQuestions: TenantQuestion[] = [
   {
     id: 'household_size',
     text: 'How many people will be living with you?',
-    helperText: 'This will help determine how many rooms are needed for your family size. Questions 5 and 6 go together.',
+    helperText: 'This will help determine how many rooms are needed for your family size. Questions 6 and 7 go together.',
     type: 'single',
     choices: [
       { id: 'a', label: '2', score: 0 }, // score is computed via Q5+Q6 rule
@@ -104,14 +104,14 @@ export const tenantQuestions: TenantQuestion[] = [
     text: 'If your rent is $1,500, and you had $2,000 in the bank, and you had a car repair for $800, what would you do?',
     type: 'single',
     choices: [
-      { id: 'a', label: 'Would you pay your rent on time.', score: 10 },
+      { id: 'a', label: 'I would pay my rent on time.', score: 10 },
       {
         id: 'b',
-        label: 'Would you call your landlord to let them know you will be late and when you will be paying.',
+        label: 'I would call my landlord to let them know I might be late and when I will pay.',
         score: 7,
       },
-      { id: 'c', label: 'Would you fix your car and pay for next month.', score: 1 },
-      { id: 'd', label: 'Do you keep emergency funds available.', score: 10 },
+      { id: 'c', label: 'I would fix my car and pay next month.', score: 1 },
+      { id: 'd', label: 'I keep emergency funds available.', score: 10 },
     ],
   },
   {
@@ -170,4 +170,15 @@ export const tenantQuestions: TenantQuestion[] = [
     ],
   },
 ]
+
+/** Resolve stored answer id to human-readable label (tenant profile, landlord applicant view, etc.). */
+export function getTenantQuestionnaireChoiceLabel(
+  questionId: string,
+  choiceId: string | null | undefined,
+): string | null {
+  if (!choiceId || typeof choiceId !== 'string') return null
+  const q = tenantQuestions.find((x) => x.id === questionId)
+  const choice = q?.choices.find((c) => c.id === choiceId)
+  return choice?.label ?? null
+}
 

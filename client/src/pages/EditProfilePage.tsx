@@ -10,19 +10,10 @@ type ProfileRecord = {
   display_name: string | null
   avatar_url: string | null
   phone: string | null
+  bio: string | null
+  city: string | null
   role?: string | null
 } | null
-
-const DEFAULTS = {
-  fullName: 'Sarah Johnson',
-  phoneNumber: '+1 (555) 123-4567',
-  bio:
-    "I'm a marketing professional looking for a quiet, pet-friendly place to call home. I work remotely most days and enjoy cooking, reading, and spending time with my cat, Luna. I'm a responsible tenant who values cleanliness and maintaining good relationships with landlords and neighbors.",
-  leaseIntent: '',
-  moveInAvailability: '2025-03-01',
-  budgetMin: '2500',
-  budgetMax: '3500',
-}
 
 function Field({
   label,
@@ -62,29 +53,28 @@ export function EditProfilePage() {
   const [photoPreviewOpen, setPhotoPreviewOpen] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  const [fullName, setFullName] = useState(DEFAULTS.fullName)
-  const [phoneNumber, setPhoneNumber] = useState(DEFAULTS.phoneNumber)
-  const [bio, setBio] = useState(DEFAULTS.bio)
-  const [leaseIntent, setLeaseIntent] = useState(DEFAULTS.leaseIntent)
-  const [moveInAvailability, setMoveInAvailability] = useState(DEFAULTS.moveInAvailability)
-  const [budgetMin, setBudgetMin] = useState(DEFAULTS.budgetMin)
-  const [budgetMax, setBudgetMax] = useState(DEFAULTS.budgetMax)
-  const [firstName, setFirstName] = useState('Sarah')
-  const [lastName, setLastName] = useState('Johnson')
-  const [location, setLocation] = useState('San Francisco, CA')
-  const [businessName, setBusinessName] = useState('Johnson Property Management LLC')
-  const [businessType, setBusinessType] = useState('Limited Liability Company')
-  const [businessAddress, setBusinessAddress] = useState('1234 Market Street, Suite 500, San Francisco, CA 94102')
-  const [businessPhone, setBusinessPhone] = useState('(415) 555-0123')
-  const [businessEmail, setBusinessEmail] = useState('info@johnsonproperties.com')
-  const [website, setWebsite] = useState('www.johnsonproperties.com')
-  const [personalPhone, setPersonalPhone] = useState('(415) 555-0198')
-  const [personalEmail, setPersonalEmail] = useState('sarah.johnson@email.com')
-  const [preferredContactMethod, setPreferredContactMethod] = useState('Email')
-  const [emergencyContact, setEmergencyContact] = useState('Michael Johnson - (415) 555-0199')
-  const [landlordBio, setLandlordBio] = useState(
-    "I'm a professional property manager with over 6 years of experience in the San Francisco rental market. I believe in creating positive, long-term relationships with my tenants and maintaining high-quality living spaces. I'm responsive to maintenance requests and always available for any questions or concerns.",
-  )
+  const [fullName, setFullName] = useState('')
+  const [phoneNumber, setPhoneNumber] = useState('')
+  const [bio, setBio] = useState('')
+  const [city, setCity] = useState('')
+  const [leaseIntent, setLeaseIntent] = useState('')
+  const [moveInAvailability, setMoveInAvailability] = useState('')
+  const [budgetMin, setBudgetMin] = useState('')
+  const [budgetMax, setBudgetMax] = useState('')
+  const [firstName, setFirstName] = useState('')
+  const [lastName, setLastName] = useState('')
+  const [location, setLocation] = useState('')
+  const [businessName, setBusinessName] = useState('')
+  const [businessType, setBusinessType] = useState('')
+  const [businessAddress, setBusinessAddress] = useState('')
+  const [businessPhone, setBusinessPhone] = useState('')
+  const [businessEmail, setBusinessEmail] = useState('')
+  const [website, setWebsite] = useState('')
+  const [personalPhone, setPersonalPhone] = useState('')
+  const [personalEmail, setPersonalEmail] = useState('')
+  const [preferredContactMethod, setPreferredContactMethod] = useState('')
+  const [emergencyContact, setEmergencyContact] = useState('')
+  const [landlordBio, setLandlordBio] = useState('')
 
   useEffect(() => {
     async function loadProfile() {
@@ -92,13 +82,17 @@ export function EditProfilePage() {
 
       const { data } = await supabase
         .from('profiles')
-        .select('display_name, avatar_url, phone')
+        .select('display_name, avatar_url, phone, bio, city')
         .eq('id', user.id)
         .maybeSingle()
 
       setProfile(data)
-      setFullName(data?.display_name?.trim() || DEFAULTS.fullName)
-      setPhoneNumber(data?.phone || DEFAULTS.phoneNumber)
+      setFullName(data?.display_name?.trim() || '')
+      setPhoneNumber(data?.phone || '')
+      setBio(data?.bio?.trim() || '')
+      setCity(data?.city?.trim() || '')
+      setLocation(data?.city?.trim() || '')
+      setLandlordBio(data?.bio?.trim() || '')
     }
 
     loadProfile()
@@ -169,12 +163,15 @@ export function EditProfilePage() {
     setSaving(true)
     setError(null)
 
+    const payload: Record<string, string | null> = {
+      display_name: fullName.trim() || null,
+      phone: phoneNumber.trim() || null,
+      bio: (profileRole === 'tenant' ? bio : landlordBio).trim() || null,
+      city: (profileRole === 'tenant' ? city : location).trim() || null,
+    }
     const { error: updateError } = await supabase
       .from('profiles')
-      .update({
-        display_name: fullName,
-        phone: phoneNumber || null,
-      })
+      .update(payload)
       .eq('id', user.id)
 
     setSaving(false)

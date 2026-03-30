@@ -1,14 +1,16 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../lib/useAuth'
 import { useProfileRole } from '../lib/useProfileRole'
+import { useRedeemPendingLandlordInvite } from '../lib/useRedeemPendingLandlordInvite'
+import { useTenantInviteRestriction } from '../lib/useTenantInviteRestriction'
+import { TenantInviteBanner } from './TenantInviteBanner'
 import { UserMenu } from './UserMenu'
 
 const tenantNavItems = [
   { path: '/matches', label: 'Matches', icon: 'home' },
-  { path: '/applications', label: 'Applications', icon: 'document' },
-  { path: '/messages', label: 'Inbox', icon: 'envelope' },
   { path: '/account', label: 'My Profile', icon: 'person' },
+  { path: '/messages', label: 'Inbox', icon: 'envelope' },
   { path: '/account/settings', label: 'Settings', icon: 'settings' },
 ] as const
 
@@ -25,7 +27,7 @@ const landlordNavItems = [
 function isNavActive(pathname: string, itemPath: string) {
   if (itemPath === '/') return pathname === '/'
   if (itemPath === '/account') {
-    return pathname === '/account' || pathname.startsWith('/account/edit') || pathname.startsWith('/account/application')
+    return pathname === '/account' || pathname.startsWith('/account/edit')
   }
   return pathname === itemPath || pathname.startsWith(itemPath + '/')
 }
@@ -88,6 +90,18 @@ export function TenantLayout() {
   const { user } = useAuth()
   const navigate = useNavigate()
   const { role: profileRole, displayName, landlordSurveyCompletedAt, loading: roleLoading } = useProfileRole(user)
+  const [inviteBannerKey, setInviteBannerKey] = useState(0)
+
+  useRedeemPendingLandlordInvite(user, profileRole, roleLoading)
+  const inviteRestriction = useTenantInviteRestriction(user, profileRole, inviteBannerKey)
+
+  useEffect(() => {
+    function onRedeemed() {
+      setInviteBannerKey((k) => k + 1)
+    }
+    window.addEventListener('rental-city-invite-redeemed', onRedeemed)
+    return () => window.removeEventListener('rental-city-invite-redeemed', onRedeemed)
+  }, [])
 
   useEffect(() => {
     if (roleLoading) return
@@ -168,6 +182,9 @@ export function TenantLayout() {
           <div className="flex-1 flex flex-col min-w-0">
             <main className="flex-1 overflow-auto min-w-0">
               <div className="w-full pt-4 pb-6 shrink-0">
+                {profileRole === 'tenant' && inviteRestriction.active ? (
+                  <TenantInviteBanner restriction={inviteRestriction} />
+                ) : null}
                 <Outlet />
               </div>
             </main>
@@ -176,7 +193,7 @@ export function TenantLayout() {
 
         <footer className="relative z-10 bg-white border-t py-6 shrink-0 -mx-4 pl-2 pr-4">
           <div className="flex items-center">
-            <span className="text-sm text-gray-600">© 2025 Rental City. All rights reserved.</span>
+            <span className="text-sm text-gray-600">© 2026 Rental City. All rights reserved.</span>
             <div className="w-56 shrink-0 mr-4" aria-hidden />
             <div className="flex-1 min-w-0 flex justify-end">
               <nav className="flex items-center gap-6 text-sm text-gray-600">

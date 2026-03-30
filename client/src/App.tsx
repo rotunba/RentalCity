@@ -9,6 +9,10 @@ import { AccountSettingsPage } from './pages/AccountSettingsPage'
 import { ChangeEmailPage } from './pages/ChangeEmailPage'
 import { ChangePasswordPage } from './pages/ChangePasswordPage'
 import { EditProfilePage } from './pages/EditProfilePage'
+import { EditBioPage } from './pages/EditBioPage'
+import { EditRentalHistoryPage } from './pages/EditRentalHistoryPage'
+import { EditEmploymentHistoryPage } from './pages/EditEmploymentHistoryPage'
+import { EditLeasePreferencesPage } from './pages/EditLeasePreferencesPage'
 import { LegalPage } from './pages/LegalPage'
 import { PaymentMethodPage } from './pages/PaymentMethodPage'
 import { PaymentHistoryPage } from './pages/PaymentHistoryPage'
@@ -31,17 +35,17 @@ import { LandlordMatchPage } from './pages/LandlordMatchPage'
 import { LeasePreferencesPage } from './pages/LeasePreferencesPage'
 import { TenantQuestionnairePage } from './pages/TenantQuestionnairePage'
 import { CompatibilitySurveyPage } from './pages/CompatibilitySurveyPage'
-import { ApplicationsPage } from './pages/ApplicationsPage'
 import { ApplicationDetailsPage } from './pages/ApplicationDetailsPage'
 import { ReviewSubmittedPage } from './pages/ReviewSubmittedPage'
 import { UniversalApplicationPage } from './pages/UniversalApplicationPage'
-import { ApplicationFormPage } from './pages/ApplicationFormPage'
 import { PropertyDetailsPage } from './pages/PropertyDetailsPage'
 import { LandlordProfilePreviewPage } from './pages/LandlordProfilePreviewPage'
 import { LandlordPropertyDetailsPage } from './pages/LandlordPropertyDetailsPage'
 import { PropertiesPage } from './pages/PropertiesPage'
 import { PropertyPublishedPage } from './pages/PropertyPublishedPage'
 import { LandlordTenantProfilePage } from './pages/LandlordTenantProfilePage'
+import { TenantLandlordProfilePage } from './pages/TenantLandlordProfilePage'
+import { LandlordTenantReviewsPage } from './pages/LandlordTenantReviewsPage'
 import { AddPropertyIntroPage } from './pages/AddPropertyIntroPage'
 import { AddPropertyBasicInfoPage } from './pages/AddPropertyBasicInfoPage'
 import { AddPropertyCommunityPage } from './pages/AddPropertyCommunityPage'
@@ -51,6 +55,10 @@ import { AddPropertyPreviewPage } from './pages/AddPropertyPreviewPage'
 import { AboutPage } from './pages/AboutPage'
 import { PublicLegalPage } from './pages/PublicLegalPage'
 import { PublicSupportPage } from './pages/PublicSupportPage'
+import { RentalApplicationPage } from './pages/RentalApplicationPage'
+import { TenantInviteLandingPage } from './pages/TenantInviteLandingPage'
+import { TenantAccountReviewsPage } from './pages/TenantAccountReviewsPage'
+import { LandlordRatingsGivenPage } from './pages/LandlordRatingsGivenPage'
 
 export default function App() {
   const { user, loading } = useAuth()
@@ -69,20 +77,31 @@ export default function App() {
         <Route index element={user ? <HomePage /> : <WelcomePage />} />
         <Route path="notifications" element={user ? <NotificationsPage /> : <Navigate to="/login" replace />} />
         <Route path="matches" element={user ? <YourMatchesPage /> : <Navigate to="/login" replace />} />
+        <Route path="matches/tenant/:id/reviews" element={user ? <LandlordTenantReviewsPage /> : <Navigate to="/login" replace />} />
         <Route path="matches/tenant/:id" element={user ? <LandlordTenantProfilePage /> : <Navigate to="/login" replace />} />
-        <Route path="applications" element={user ? <ApplicationsPage /> : <Navigate to="/login" replace />} />
+        <Route path="matches/landlord/:id" element={user ? <TenantLandlordProfilePage /> : <Navigate to="/login" replace />} />
+        <Route path="rental-needs" element={user ? <RentalNeedsPage /> : <Navigate to="/login" replace />} />
+        <Route path="lease-preferences" element={user ? <LeasePreferencesPage /> : <Navigate to="/login" replace />} />
+        <Route path="tenant-questionnaire" element={user ? <TenantQuestionnairePage /> : <Navigate to="/login" replace />} />
+        <Route path="applications" element={user ? <Navigate to="/matches?tab=applied" replace /> : <Navigate to="/login" replace />} />
         <Route path="applications/apply" element={<UniversalApplicationPage />} />
-        <Route path="applications/apply/form" element={user ? <ApplicationFormPage /> : <Navigate to="/login" replace />} />
         <Route path="property/:id" element={user ? <PropertyDetailsPage /> : <Navigate to="/login" replace />} />
         <Route path="properties" element={user ? <PropertiesPage /> : <Navigate to="/login" replace />} />
         <Route path="properties/:id" element={user ? <LandlordPropertyDetailsPage /> : <Navigate to="/login" replace />} />
         <Route path="properties/published" element={user ? <PropertyPublishedPage /> : <Navigate to="/login" replace />} />
         <Route path="messages" element={user ? <MessagingPage /> : <Navigate to="/login" replace />} />
         <Route path="account" element={user ? <AccountPage /> : <Navigate to="/login" replace />} />
+        <Route path="account/reviews" element={user ? <TenantAccountReviewsPage /> : <Navigate to="/login" replace />} />
+        <Route path="account/ratings-given" element={user ? <LandlordRatingsGivenPage /> : <Navigate to="/login" replace />} />
+        <Route path="account/rental-application" element={user ? <RentalApplicationPage /> : <Navigate to="/login" replace />} />
         <Route path="account/tenants" element={user ? <TenantsPage /> : <Navigate to="/login" replace />} />
         <Route path="account/application/:id" element={user ? <ApplicationDetailsPage /> : <Navigate to="/login" replace />} />
         <Route path="account/application/:id/review-submitted" element={user ? <ReviewSubmittedPage /> : <Navigate to="/login" replace />} />
         <Route path="account/edit" element={user ? <EditProfilePage /> : <Navigate to="/login" replace />} />
+        <Route path="account/edit/bio" element={user ? <EditBioPage /> : <Navigate to="/login" replace />} />
+        <Route path="account/edit/rental-history" element={user ? <EditRentalHistoryPage /> : <Navigate to="/login" replace />} />
+        <Route path="account/edit/employment" element={user ? <EditEmploymentHistoryPage /> : <Navigate to="/login" replace />} />
+        <Route path="account/edit/lease-preferences" element={user ? <EditLeasePreferencesPage /> : <Navigate to="/login" replace />} />
         <Route path="account/profile-preview" element={user ? <LandlordProfilePreviewPage /> : <Navigate to="/login" replace />} />
         <Route path="account/settings" element={user ? <AccountSettingsPage /> : <Navigate to="/login" replace />} />
         <Route path="account/settings/support" element={user ? <SupportPage /> : <Navigate to="/login" replace />} />
@@ -99,9 +118,9 @@ export default function App() {
       <Route path="/onboarding" element={user ? <OnboardingLayout /> : <Navigate to="/login" replace />}>
         <Route index element={<RoleSelectionPage />} />
         <Route path="role" element={<RoleSelectionPage />} />
-        <Route path="rental-needs" element={<RentalNeedsPage />} />
-        <Route path="lease-preferences" element={<LeasePreferencesPage />} />
-        <Route path="tenant-questionnaire" element={<TenantQuestionnairePage />} />
+        <Route path="rental-needs" element={<Navigate to="/rental-needs" replace />} />
+        <Route path="lease-preferences" element={<Navigate to="/lease-preferences" replace />} />
+        <Route path="tenant-questionnaire" element={<Navigate to="/tenant-questionnaire" replace />} />
         <Route path="profile" element={<ProfileCreationPage />} />
         <Route path="survey" element={<CompatibilitySurveyPage />} />
         <Route path="survey/intro" element={<LandlordMatchPage />} />
@@ -135,6 +154,9 @@ export default function App() {
       </Route>
       <Route path="/support" element={<Layout />}>
         <Route index element={<PublicSupportPage />} />
+      </Route>
+      <Route path="/invite" element={<Layout />}>
+        <Route path=":token" element={<TenantInviteLandingPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

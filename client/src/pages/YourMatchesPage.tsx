@@ -1,9 +1,16 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
-import { formatBedrooms, formatBathrooms, formatCurrency } from '../lib/propertyDraft'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
+import { formatBedrooms, formatCurrency } from '../lib/propertyDraft'
 import { useAuth } from '../lib/useAuth'
 import { useProfileRole } from '../lib/useProfileRole'
 import { supabase } from '../lib/supabase'
+import {
+  fetchLandlordMatchCatalog,
+  fetchMatchesForTenant,
+  fetchMatchesForLandlord,
+  type MatchResult,
+} from '../lib/matchesApi'
 
 type MatchCard = {
   id: string
@@ -16,18 +23,40 @@ type MatchCard = {
   bedrooms: number
   monthly_rent_cents: number
   amenitiesList: string[]
+  landlordId: string
+  landlordDisplayName: string | null
 }
 
 type ProfileRole = 'tenant' | 'landlord'
 
 type LandlordMatchStatus = 'locked' | 'unlocked' | 'accepted' | 'declined'
 
+type LandlordMatchFilter =
+  | 'all'
+  | 'applications'
+  | 'prospects'
+  | 'locked'
+  | 'unlocked'
+  | 'accepted'
+  | 'declined'
+
 type LandlordMatchCard = {
   id: string
+  applicationId: string | null
+  hasApplication: boolean
+  /** ISO created_at when this row is tied to an application (for sorting). */
+  applicationCreatedAt: string | null
   tenantId: string
+  propertyId: string
+  listingLabel: string
   name: string
+  avatarUrl: string | null
   appliedAgo: string
   status: LandlordMatchStatus
+  /** Property-specific score from server catalog; falls back to batch landlord API when absent. */
+  matchPreview: MatchResult | null
+  /** Present when hasApplication; used to keep unlock state after undo decline and to fix workflow UI. */
+  applicationUnlockedAt: string | null
   compatibilitySummary: string
   creditScore: string
   tenantScore: string
@@ -46,6 +75,14 @@ function formatRelativeTime(createdAt: string) {
   return `Applied ${Math.floor(diffDays / 7)} weeks ago`
 }
 
+/** Tenant `tenant_preferences.lease_length_months` — same shaping as Account lease duration. */
+function formatLeaseIntentLabel(months: number | null | undefined): string {
+  if (months == null) return '—'
+  if (months < 12) return `${months} months`
+  if (months >= 24) return `${months / 12}+ years`
+  return `${months / 12} year`
+}
+
 // Match states: locked (must unlock first), unlocked (can accept or deny), accepted, declined.
 // Only an unlocked match can be accepted or denied.
 function applicationStatusToMatch(status: string, unlockedAt: string | null): LandlordMatchStatus {
@@ -56,7 +93,44 @@ function applicationStatusToMatch(status: string, unlockedAt: string | null): La
   return 'locked'
 }
 
-function LandlordAvatar({ name }: { name: string }) {
+/** Approve/decline/unlock UI: pending + unlocked_at must stay unlocked (e.g. after undo decline). */
+function effectiveLandlordWorkflowStatus(match: LandlordMatchCard): LandlordMatchStatus {
+  if (
+    match.hasApplication &&
+    match.status === 'locked' &&
+    match.applicationUnlockedAt != null &&
+    String(match.applicationUnlockedAt).trim() !== ''
+  ) {
+    return 'unlocked'
+  }
+  return match.status
+}
+
+/** Deep-link tenant profile to the application row (listing) for this match. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+const LANDLORD_MATCH_STATUS_LABEL: Record<LandlordMatchStatus, string> = {
+  locked: 'Locked',
+  unlocked: 'Unlocked',
+  accepted: 'Accepted',
+  declined: 'Declined',
+}
+
+/** Opens landlord view of tenant profile (browse-only). Unlock / accept / decline stay on Your matches. */
+function landlordTenantProfilePath(match: LandlordMatchCard): string {
+  return `/matches/tenant/${encodeURIComponent(match.tenantId)}`
+}
+
+/** Tenant opens the public-style landlord profile (mirrors landlord → tenant profile link). */
+function tenantLandlordProfilePath(landlordId: string, opts?: { propertyId?: string; returnTo?: string }) {
+  const q = new URLSearchParams()
+  if (opts?.propertyId) q.set('property', opts.propertyId)
+  if (opts?.returnTo) q.set('returnTo', opts.returnTo)
+  const qs = q.toString()
+  return `/matches/landlord/${encodeURIComponent(landlordId)}${qs ? `?${qs}` : ''}`
+}
+
+function LandlordAvatar({ name, avatarUrl }: { name: string; avatarUrl: string | null }) {
   const initials = name
     .split(' ')
     .filter(Boolean)
@@ -64,8 +138,18 @@ function LandlordAvatar({ name }: { name: string }) {
     .map((part) => part[0]?.toUpperCase())
     .join('')
 
+  if (avatarUrl?.trim()) {
+    return (
+      <img
+        src={avatarUrl.trim()}
+        alt={`${name} profile photo`}
+        className="h-9 w-9 shrink-0 rounded-full object-cover ring-1 ring-black/5"
+      />
+    )
+  }
+
   return (
-    <div className="flex h-9 w-9 items-center justify-center rounded-full bg-[radial-gradient(circle_at_top,_#d6c7ba,_#8a6f5a)] text-xs font-medium text-white">
+    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[radial-gradient(circle_at_top,_#d6c7ba,_#8a6f5a)] text-xs font-medium text-white">
       {initials}
     </div>
   )
@@ -86,34 +170,274 @@ function saveSavedIds(ids: Set<string>) {
   localStorage.setItem(SAVED_IDS_KEY, JSON.stringify([...ids]))
 }
 
+type MatchDimensions = { affordability: number; stability: number; risk: number; lifestyle: number; policy: number }
+
+const DIMENSION_LABELS: { key: keyof MatchDimensions; emoji: string; label: string }[] = [
+  { key: 'affordability', emoji: '💰', label: 'Affordability' },
+  { key: 'stability', emoji: '🏠', label: 'Stability' },
+  { key: 'risk', emoji: '🛡️', label: 'Risk fit' },
+  { key: 'lifestyle', emoji: '✨', label: 'Lifestyle' },
+  { key: 'policy', emoji: '📋', label: 'Policy' },
+]
+
+// Rent Score uses same keys; 5th dimension is "Space fit" (from questionnaire)
+const RENT_SCORE_LABELS: { key: keyof MatchDimensions; emoji: string; label: string }[] = [
+  { key: 'affordability', emoji: '💰', label: 'Affordability' },
+  { key: 'stability', emoji: '🏠', label: 'Stability' },
+  { key: 'risk', emoji: '🛡️', label: 'Payment risk' },
+  { key: 'lifestyle', emoji: '✨', label: 'Lifestyle' },
+  { key: 'policy', emoji: '📋', label: 'Space fit' },
+]
+
+const DIMENSION_WEIGHTS: Record<keyof MatchDimensions, number> = {
+  affordability: 0.35,
+  stability: 0.25,
+  risk: 0.2,
+  lifestyle: 0.1,
+  policy: 0.1,
+}
+
+// 0 = red, 1 = green (pct is 0–100). Returns bg- and border- class names.
+function scoreBarColor(pct: number): { bg: string; border: string } {
+  if (pct <= 25) return { bg: 'bg-red-500', border: 'border-red-500' }
+  if (pct <= 50) return { bg: 'bg-orange-500', border: 'border-orange-500' }
+  if (pct <= 75) return { bg: 'bg-amber-500', border: 'border-amber-500' }
+  return { bg: 'bg-emerald-500', border: 'border-emerald-500' }
+}
+
+function ScoreBar({ value, max = 10 }: { value: number; max?: number }) {
+  const pct = Math.min(100, Math.max(0, (value / max) * 100))
+  const { bg } = scoreBarColor(pct)
+  return (
+    <div className="h-1.5 w-14 overflow-hidden rounded-full bg-gray-200">
+      <div
+        className={`h-full rounded-full transition-[width] ${bg}`}
+        style={{ width: `${pct}%` }}
+      />
+    </div>
+  )
+}
+
+function computeOverallFromDimensions(dimensions: MatchDimensions): number {
+  const overall0to1 =
+    0.35 * (dimensions.affordability / 10) +
+    0.25 * (dimensions.stability / 10) +
+    0.25 * (dimensions.risk / 10) +
+    0.1 * (dimensions.lifestyle / 10) +
+    0.05 * (dimensions.policy / 10)
+  return Math.round(Math.max(0, Math.min(1, overall0to1)) * 100)
+}
+
+function getDimensionContribution(key: keyof MatchDimensions, score: number): number {
+  const safe = Number.isFinite(score) ? Math.max(0, Math.min(10, score)) : 0
+  return (safe / 10) * (DIMENSION_WEIGHTS[key] * 100)
+}
+
+function getDimensionMaxContribution(key: keyof MatchDimensions): number {
+  return DIMENSION_WEIGHTS[key] * 100
+}
+
+function formatContribution(value: number): string {
+  const rounded = Math.round(value * 10) / 10
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1)
+}
+
+function MatchScoreDisplay({
+  overall,
+  dimensions,
+  compact = false,
+  showQuestionnaireIncomeHint = true,
+}: {
+  overall: number
+  dimensions: MatchDimensions
+  compact?: boolean
+  /** When false, skips the nested questionnaire link (required when this block sits inside a profile `Link`). */
+  showQuestionnaireIncomeHint?: boolean
+}) {
+  const overallPct = Math.min(100, Math.max(0, overall))
+  const { bg: overallBg, border: overallBorder } = scoreBarColor(overallPct)
+  return (
+    <div className={compact ? 'space-y-2' : 'space-y-3'}>
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="font-semibold text-gray-900">{compact ? 'Match' : 'Match score'}</span>
+        <span className={`inline-flex h-8 w-8 items-center justify-center rounded-full border-2 text-sm font-semibold text-gray-800 ${overallBorder}`}>
+          {overall}
+        </span>
+        <div className="flex-1 min-w-[60px] max-w-[100px] h-2 overflow-hidden rounded-full bg-gray-200">
+          <div
+            className={`h-full rounded-full transition-[width] ${overallBg}`}
+            style={{ width: `${overallPct}%` }}
+          />
+        </div>
+      </div>
+      <div className={compact ? 'space-y-1.5' : 'space-y-2'}>
+        {DIMENSION_LABELS.map(({ key, emoji, label }) => {
+          const score = dimensions[key] ?? 0
+          const contribution = getDimensionContribution(key, score)
+          const maxContribution = getDimensionMaxContribution(key)
+          return (
+            <div key={key} className="flex items-center gap-2 text-xs">
+              <span className="w-5 text-center shrink-0">{emoji}</span>
+              <span className="text-gray-700 min-w-[8rem]">{label}</span>
+              <ScoreBar value={contribution} max={maxContribution} />
+              <span className="text-gray-500 min-w-[8ch] text-right">
+                {formatContribution(contribution)} / {formatContribution(maxContribution)}
+              </span>
+            </div>
+          )
+        })}
+      </div>
+      <p className="text-[11px] text-gray-500">Bars show weighted contribution to total score.</p>
+      {/* Reserve space so card height stays consistent even when this note is not shown. */}
+      <div className="mt-2 min-h-[22px]">
+        {showQuestionnaireIncomeHint && (dimensions.affordability ?? 0) === 0 ? (
+          <p className="text-[11px] text-gray-500">
+          Affordability is based on this listing’s rent and your income. Add or update income in the{' '}
+          <Link to="/tenant-questionnaire" className="text-emerald-600 hover:underline">questionnaire</Link> if it’s missing.
+          </p>
+        ) : (
+          <div className="h-0 overflow-hidden" aria-hidden />
+        )}
+      </div>
+    </div>
+  )
+}
+
 export function YourMatchesPage() {
   const navigate = useNavigate()
+  const location = useLocation()
+  const [searchParams, setSearchParams] = useSearchParams()
+  function initialTenantMatchesTab(sp: URLSearchParams): 'all' | 'saved' | 'applied' {
+    const t = sp.get('tab')
+    return t === 'saved' || t === 'applied' ? t : 'all'
+  }
+  const landlordMatchesTenantId = useMemo(() => {
+    const raw = searchParams.get('tenant')?.trim()
+    if (!raw || !UUID_RE.test(raw)) return null
+    return raw
+  }, [searchParams])
+  const tenantProfileNavState = useMemo(
+    () => ({ from: `${location.pathname}${location.search}` }),
+    [location.pathname, location.search],
+  )
   const { user } = useAuth()
-const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyCompletedAt, loading: roleLoading } = useProfileRole(user)
-  const [activeTab, setActiveTab] = useState<'all' | 'saved'>('all')
+const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyCompletedAt, loading: roleLoading, refetch: refetchProfile } = useProfileRole(user)
+  const [activeTab, setActiveTab] = useState<'all' | 'saved' | 'applied'>(() =>
+    initialTenantMatchesTab(searchParams),
+  )
   const [bedrooms, setBedrooms] = useState('any')
   const [priceRange, setPriceRange] = useState<[number, number]>([500, 3000])
   const [amenities, setAmenities] = useState({ petFriendly: false, parking: false, laundry: false, gym: false })
+  const AMENITY_LABELS: Record<string, string> = {
+    pet_friendly: '🐾',
+    parking: '🅿️',
+    laundry: '🧺',
+    gym: '🏋️',
+  }
   const [savedIds, setSavedIds] = useState<Set<string>>(loadSavedIds)
+  const [applicationIdByPropertyId, setApplicationIdByPropertyId] = useState<Record<string, string>>({})
   const [appliedIds, setAppliedIds] = useState<Set<string>>(new Set())
+  const [hasActiveUniversalApplication, setHasActiveUniversalApplication] = useState<boolean | null>(null)
   const [submissionModal, setSubmissionModal] = useState<{ propertyTitle: string } | null>(null)
   const [landlordProperty, setLandlordProperty] = useState('')
-  const [landlordFilter, setLandlordFilter] = useState<'all' | 'unlocked' | 'locked' | 'accepted' | 'declined'>('all')
-  const [unlockModalMatch, setUnlockModalMatch] = useState<LandlordMatchCard | null>(null)
+  const [landlordFilter, setLandlordFilter] = useState<LandlordMatchFilter>('all')
 
   const [tenantMatches, setTenantMatches] = useState<MatchCard[]>([])
   const [landlordMatches, setLandlordMatches] = useState<LandlordMatchCard[]>([])
   const [landlordProperties, setLandlordProperties] = useState<Array<{ id: string; label: string }>>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const MATCHES_PAGE_SIZE = 6
-  const [landlordMatchesShown, setLandlordMatchesShown] = useState(MATCHES_PAGE_SIZE)
-  const [tenantMatchesShown, setTenantMatchesShown] = useState(MATCHES_PAGE_SIZE)
+  const MATCHES_PAGE_SIZE = 9
+  const TENANT_MATCHES_PAGE_SIZE = 6
+  /** Eligible tenant ↔ property matches (questionnaire complete), by match score */
+  const MAX_TENANT_TOP_MATCHES = 10
+  const [landlordPage, setLandlordPage] = useState(1)
+  const [tenantPage, setTenantPage] = useState(1)
+  const [tenantOverallScore, setTenantOverallScore] = useState<number | null>(null)
+  const [tenantDimensionScores, setTenantDimensionScores] = useState<MatchDimensions | null>(null)
+  const [tenantQuestionnaireLoading, setTenantQuestionnaireLoading] = useState(false)
+  const [rentScoreBreakdownOpen, setRentScoreBreakdownOpen] = useState(false)
+  const rentScoreCardRef = useRef<HTMLDivElement>(null)
+  const [matchByPropertyId, setMatchByPropertyId] = useState<Record<string, MatchResult>>({})
+  const [matchByTenantId, setMatchByTenantId] = useState<Record<string, MatchResult>>({})
+  const [matchLoading, setMatchLoading] = useState(false)
+  const [landlordCardBusyId, setLandlordCardBusyId] = useState<string | null>(null)
+  const [landlordCardError, setLandlordCardError] = useState<{ cardId: string; message: string } | null>(null)
+
+  const commitTenantMatchesTab = useCallback(
+    (tab: 'all' | 'saved' | 'applied') => {
+      setActiveTab(tab)
+      if (profileRole !== 'tenant') return
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev)
+          if (tab === 'all') next.delete('tab')
+          else next.set('tab', tab)
+          return next
+        },
+        { replace: true },
+      )
+    },
+    [profileRole, setSearchParams],
+  )
+
+  useEffect(() => {
+    if (profileRole !== 'tenant') return
+    const t = searchParams.get('tab')
+    if (t === 'saved' || t === 'applied') setActiveTab(t)
+    else setActiveTab('all')
+  }, [profileRole, searchParams])
+
+  const loadTenantQuestionnaireScore = useCallback(async () => {
+    if (!user || profileRole !== 'tenant') return
+    setTenantQuestionnaireLoading(true)
+    const { data } = await supabase
+      .from('tenant_questionnaire')
+      .select('overall_score, affordability_score, stability_score, payment_risk_score, lifestyle_score, space_fit_score')
+      .eq('user_id', user.id)
+      .maybeSingle()
+    if (data) {
+      const n = (v: unknown) => {
+        const raw = Number(v) || 0
+        // Backward-compat: some historical rows were stored in 0-100 scale.
+        const normalized = raw > 10 ? raw / 10 : raw
+        return Math.max(0, Math.min(10, normalized))
+      }
+      const dimensions = {
+        affordability: n(data.affordability_score),
+        stability: n(data.stability_score),
+        risk: n(data.payment_risk_score),
+        lifestyle: n(data.lifestyle_score),
+        policy: n(data.space_fit_score),
+      }
+      setTenantDimensionScores(dimensions)
+      // Keep UI internally consistent even if stored overall_score is stale.
+      setTenantOverallScore(computeOverallFromDimensions(dimensions))
+    } else {
+      setTenantOverallScore(null)
+      setTenantDimensionScores(null)
+    }
+    setTenantQuestionnaireLoading(false)
+  }, [user, profileRole])
+
+  useEffect(() => {
+    loadTenantQuestionnaireScore()
+  }, [loadTenantQuestionnaireScore])
+
+  // Refetch profile once when tenant lands on matches with survey incomplete (avoids stale state
+  // after completing questionnaire so we don't flash the "Set your preferences" prompt)
+  const [tenantSurveyRefetched, setTenantSurveyRefetched] = useState(false)
+  useEffect(() => {
+    if (profileRole !== 'tenant' || roleLoading || tenantSurveyCompletedAt != null || tenantSurveyRefetched) return
+    refetchProfile().then(() => setTenantSurveyRefetched(true))
+  }, [profileRole, roleLoading, tenantSurveyCompletedAt, tenantSurveyRefetched, refetchProfile])
 
   const loadTenantMatches = useCallback(async () => {
     const { data, error } = await supabase
       .from('properties')
-      .select('id, title, address_line1, city, state, bedrooms, bathrooms, amenities, monthly_rent_cents')
+      .select(
+        'id, title, address_line1, city, state, bedrooms, bathrooms, amenities, monthly_rent_cents, landlord_id, landlord:landlord_id(display_name, avatar_url)',
+      )
       .eq('status', 'active')
       .order('created_at', { ascending: false })
 
@@ -122,9 +446,27 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
       return
     }
 
+    type PropRow = {
+      id: string
+      title: string | null
+      address_line1: string
+      city: string
+      state: string | null
+      bedrooms: number
+      bathrooms: number
+      amenities: unknown
+      monthly_rent_cents: number
+      landlord_id: string
+      landlord?: { display_name?: string | null; avatar_url?: string | null } | { display_name?: string | null; avatar_url?: string | null }[] | null
+    }
+
     setTenantMatches(
-      (data ?? []).map((p) => {
+      ((data ?? []) as PropRow[]).map((p) => {
         const amenityList = Array.isArray(p.amenities) ? p.amenities.map((a) => String(a)) : []
+        // Display emojis on match cards; filtering still uses the raw amenity keys.
+        const amenityDisplay = amenityList.map((a) => AMENITY_LABELS[a] ?? a)
+        const landlordRaw = p.landlord
+        const landlord = Array.isArray(landlordRaw) ? landlordRaw[0] : landlordRaw
         return {
           id: p.id,
           title: p.title || p.address_line1,
@@ -132,10 +474,12 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
           price: `${formatCurrency(p.monthly_rent_cents)}/month`,
           saved: false,
           compatibility: 'Property matched based on your preferences.',
-          tags: [formatBedrooms(p.bedrooms), ...amenityList.slice(0, 3)].filter(Boolean),
+          tags: [formatBedrooms(p.bedrooms), ...amenityDisplay.slice(0, 3)].filter(Boolean),
           bedrooms: Number(p.bedrooms) || 0,
           monthly_rent_cents: Number(p.monthly_rent_cents) || 0,
           amenitiesList: amenityList,
+          landlordId: p.landlord_id,
+          landlordDisplayName: landlord?.display_name?.trim() || null,
         }
       }),
     )
@@ -145,10 +489,30 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
     if (!user || profileRole !== 'tenant') return
     const { data, error } = await supabase
       .from('applications')
-      .select('property_id')
+      .select('id, property_id, created_at')
       .eq('tenant_id', user.id)
+      .order('created_at', { ascending: false })
     if (error) return
-    setAppliedIds(new Set((data ?? []).map((r) => r.property_id)))
+
+    const rows = (data ?? []) as Array<{ id: string; property_id: string; created_at: string }>
+    setAppliedIds(new Set(rows.map((r) => r.property_id)))
+    const idByProp: Record<string, string> = {}
+    for (const r of rows) {
+      if (!idByProp[r.property_id]) idByProp[r.property_id] = r.id
+    }
+    setApplicationIdByPropertyId(idByProp)
+
+    // Universal rental application window controls whether the tenant can apply to properties.
+    const nowIso = new Date().toISOString()
+    const { data: universalData } = await supabase
+      .from('universal_applications')
+      .select('id')
+      .eq('tenant_id', user.id)
+      .eq('status', 'active')
+      .gt('valid_until', nowIso)
+      .limit(1)
+
+    setHasActiveUniversalApplication((universalData ?? []).length > 0)
   }, [user, profileRole])
 
   const loadLandlordMatches = useCallback(async (propertyIds: string[]) => {
@@ -158,41 +522,181 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
     }
 
     const selectColumns =
-      'id, status, unlocked_at, created_at, tenant:tenant_id(id, display_name), property:property_id(id, title, address_line1)'
+      'id, tenant_id, property_id, status, unlocked_at, created_at, tenant:tenant_id(id, display_name, avatar_url), property:property_id(id, title, address_line1)'
 
-    const result = await supabase
-      .from('applications')
-      .select(selectColumns)
-      .in('property_id', propertyIds)
-      .order('created_at', { ascending: false })
+    const [result, propMetaResult, sessionResult] = await Promise.all([
+      supabase
+        .from('applications')
+        .select(selectColumns)
+        .in('property_id', propertyIds)
+        .order('created_at', { ascending: false }),
+      supabase.from('properties').select('id, title, address_line1').in('id', propertyIds).eq('landlord_id', user.id),
+      supabase.auth.getSession(),
+    ])
 
     if (result.error) {
       setError(result.error.message)
       return
     }
 
-    const rows = (result.data ?? []) as Array<{
+    type AppRow = {
       id: string
+      tenant_id: string
+      property_id: string
       status: string
       unlocked_at?: string | null
       created_at: string
-      tenant?: { id?: string; display_name?: string }
-      property?: { title?: string; address_line1?: string }
-    }>
+      tenant?: { id?: string; display_name?: string; avatar_url?: string | null }
+      property?: { id?: string; title?: string; address_line1?: string }
+    }
+    const rows = (result.data ?? []) as AppRow[]
 
-    setLandlordMatches(
-      rows.map((row) => ({
+    const propLabelById = new Map<string, string>()
+    for (const p of (propMetaResult.data ?? []) as Array<{ id: string; title?: string | null; address_line1?: string }>) {
+      propLabelById.set(p.id, p.title?.trim() || p.address_line1 || 'Listing')
+    }
+
+    const token = sessionResult.data.session?.access_token ?? null
+    let catalogRows: Awaited<ReturnType<typeof fetchLandlordMatchCatalog>>['rows'] = []
+    if (token) {
+      try {
+        const data = await fetchLandlordMatchCatalog(token, user.id, propertyIds, { limitPerProperty: 50 })
+        catalogRows = data.rows ?? []
+      } catch {
+        catalogRows = []
+      }
+    }
+
+    function appRowTenantPropertyKey(row: AppRow): string {
+      const tid = row.tenant_id || row.tenant?.id || row.id
+      return `${row.property_id}:${tid}`
+    }
+
+    /** One card per listing+tenant: prefer unlocked pending over newer locked duplicate applies. */
+    function pickPrimaryApplicationRow(group: AppRow[]): AppRow | undefined {
+      if (group.length === 0) return undefined
+      const pending = group.filter((r) => r.status === 'pending')
+      if (pending.length > 0) {
+        const unlocked = pending.filter(
+          (r) => r.unlocked_at != null && String(r.unlocked_at).trim() !== '',
+        )
+        const pool = unlocked.length > 0 ? unlocked : pending
+        return pool.slice().sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0]
+      }
+      return group.slice().sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0]
+    }
+
+    const appGroupsByKey = new Map<string, AppRow[]>()
+    for (const row of rows) {
+      const k = appRowTenantPropertyKey(row)
+      if (!appGroupsByKey.has(k)) appGroupsByKey.set(k, [])
+      appGroupsByKey.get(k)!.push(row)
+    }
+
+    const appByKey = new Map<string, AppRow>()
+    for (const [k, group] of appGroupsByKey) {
+      const picked = pickPrimaryApplicationRow(group)
+      if (picked) appByKey.set(k, picked)
+    }
+
+    function catalogMatchToPreview(m: MatchResult & { tenantScore?: number | null }): MatchResult {
+      return {
+        eligible: m.eligible,
+        reasons: m.reasons,
+        overall: m.overall,
+        dimensions: m.dimensions,
+        tenantScore: m.tenantScore,
+      }
+    }
+
+    const mergedByKey = new Map<string, LandlordMatchCard>()
+
+    for (const cr of catalogRows) {
+      const key = `${cr.propertyId}:${cr.tenantId}`
+      const app = appByKey.get(key)
+      const listingLabel = propLabelById.get(cr.propertyId) ?? 'Listing'
+      const tid = cr.tenantId
+      mergedByKey.set(key, {
+        id: app?.id ?? `prospect:${cr.propertyId}:${cr.tenantId}`,
+        applicationId: app?.id ?? null,
+        hasApplication: !!app,
+        applicationCreatedAt: app?.created_at ?? null,
+        tenantId: tid,
+        propertyId: cr.propertyId,
+        listingLabel,
+        name: app?.tenant?.display_name?.trim() || cr.name || 'Tenant',
+        avatarUrl: app?.tenant?.avatar_url ?? cr.avatarUrl ?? null,
+        appliedAgo: app ? formatRelativeTime(app.created_at) : 'No application yet',
+        status: app ? applicationStatusToMatch(app.status, app.unlocked_at ?? null) : 'locked',
+        matchPreview: catalogMatchToPreview(cr.match),
+        applicationUnlockedAt: app?.unlocked_at ?? null,
+        compatibilitySummary: '',
+        creditScore: '—',
+        tenantScore: '—',
+        leaseIntent: '—',
+      })
+    }
+
+    for (const [key, group] of appGroupsByKey) {
+      if (mergedByKey.has(key)) continue
+      const row = pickPrimaryApplicationRow(group)
+      if (!row) continue
+      const tid = row.tenant_id || row.tenant?.id || row.id
+      const listingLabel =
+        row.property?.title?.trim() || row.property?.address_line1 || propLabelById.get(row.property_id) || 'Listing'
+      mergedByKey.set(key, {
         id: row.id,
-        tenantId: row.tenant?.id ?? row.id,
+        applicationId: row.id,
+        hasApplication: true,
+        applicationCreatedAt: row.created_at,
+        tenantId: tid,
+        propertyId: row.property_id,
+        listingLabel,
         name: row.tenant?.display_name || 'Tenant',
+        avatarUrl: row.tenant?.avatar_url ?? null,
         appliedAgo: formatRelativeTime(row.created_at),
         status: applicationStatusToMatch(row.status, row.unlocked_at ?? null),
-        compatibilitySummary: 'See full profile for details.',
-        creditScore: 'See profile',
-        tenantScore: 'See profile',
-        leaseIntent: 'See profile',
-      })),
-    )
+        matchPreview: null,
+        applicationUnlockedAt: row.unlocked_at ?? null,
+        compatibilitySummary: '',
+        creditScore: '—',
+        tenantScore: '—',
+        leaseIntent: '—',
+      })
+    }
+
+    const tenantIds = [...new Set([...mergedByKey.values()].map((m) => m.tenantId))] as string[]
+    const leaseByTenantId = new Map<string, number | null>()
+    if (tenantIds.length > 0) {
+      const prefsResult = await supabase
+        .from('tenant_preferences')
+        .select('user_id, lease_length_months')
+        .in('user_id', tenantIds)
+      if (!prefsResult.error) {
+        for (const p of (prefsResult.data ?? []) as Array<{ user_id: string; lease_length_months: number | null }>) {
+          leaseByTenantId.set(p.user_id, p.lease_length_months ?? null)
+        }
+      }
+    }
+
+    const mergedList = [...mergedByKey.values()].map((m) => ({
+      ...m,
+      leaseIntent: formatLeaseIntentLabel(leaseByTenantId.get(m.tenantId)),
+    }))
+
+    mergedList.sort((a, b) => {
+      if (a.hasApplication !== b.hasApplication) return a.hasApplication ? -1 : 1
+      if (a.hasApplication && b.hasApplication) {
+        const ta = a.applicationCreatedAt ? new Date(a.applicationCreatedAt).getTime() : 0
+        const tb = b.applicationCreatedAt ? new Date(b.applicationCreatedAt).getTime() : 0
+        return tb - ta
+      }
+      const oa = a.matchPreview?.overall ?? 0
+      const ob = b.matchPreview?.overall ?? 0
+      return ob - oa
+    })
+
+    setLandlordMatches(mergedList)
   }, [user])
 
   const loadLandlordProperties = useCallback(async () => {
@@ -212,6 +716,195 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
     return list
   }, [user])
 
+  const reloadLandlordMatchesData = useCallback(async () => {
+    const props = await loadLandlordProperties()
+    const ids = props?.map((p) => p.id) ?? []
+    const targetIds =
+      landlordProperty && ids.includes(landlordProperty) ? [landlordProperty] : ids
+    if (targetIds.length > 0) await loadLandlordMatches(targetIds)
+    else {
+      setLandlordMatches([])
+    }
+  }, [landlordProperty, loadLandlordMatches, loadLandlordProperties])
+
+  const handleLandlordCardUnlock = useCallback(
+    async (match: LandlordMatchCard) => {
+      if (!user || !match.applicationId) return
+      setLandlordCardError(null)
+      setLandlordCardBusyId(match.id)
+      try {
+        const now = new Date().toISOString()
+        const { data, error } = await supabase
+          .from('applications')
+          .update({ unlocked_at: now })
+          .eq('id', match.applicationId)
+          .eq('status', 'pending')
+          .select('id')
+        if (error) throw error
+        if (!data?.length) {
+          throw new Error('This application could not be unlocked. It may no longer be pending.')
+        }
+        await reloadLandlordMatchesData()
+      } catch (e) {
+        setLandlordCardError({
+          cardId: match.id,
+          message: e instanceof Error ? e.message : 'Could not unlock',
+        })
+      } finally {
+        setLandlordCardBusyId(null)
+      }
+    },
+    [user, reloadLandlordMatchesData],
+  )
+
+  const handleLandlordCardUndoDecline = useCallback(
+    async (match: LandlordMatchCard) => {
+      if (!user || !match.applicationId) return
+      setLandlordCardError(null)
+      setLandlordCardBusyId(match.id)
+      try {
+        const { data: prior, error: priorErr } = await supabase
+          .from('applications')
+          .select('unlocked_at')
+          .eq('id', match.applicationId)
+          .eq('status', 'rejected')
+          .maybeSingle()
+        if (priorErr) throw priorErr
+        const unlockToKeep =
+          prior?.unlocked_at ??
+          (match.applicationUnlockedAt?.trim() ? match.applicationUnlockedAt : null)
+        const { error } = await supabase
+          .from('applications')
+          .update({
+            status: 'pending',
+            ...(unlockToKeep ? { unlocked_at: unlockToKeep } : {}),
+          })
+          .eq('id', match.applicationId)
+          .eq('status', 'rejected')
+        if (error) throw error
+        await reloadLandlordMatchesData()
+      } catch (e) {
+        setLandlordCardError({
+          cardId: match.id,
+          message: e instanceof Error ? e.message : 'Could not restore application',
+        })
+      } finally {
+        setLandlordCardBusyId(null)
+      }
+    },
+    [user, reloadLandlordMatchesData],
+  )
+
+  const handleLandlordCardApprove = useCallback(
+    async (match: LandlordMatchCard) => {
+      if (!user || !match.applicationId) return
+      setLandlordCardError(null)
+      setLandlordCardBusyId(match.id)
+      try {
+        const { data: updated, error: updateErr } = await supabase
+          .from('applications')
+          .update({ status: 'approved' })
+          .eq('id', match.applicationId)
+          .eq('status', 'pending')
+          .not('unlocked_at', 'is', null)
+          .select('id')
+        if (updateErr) throw updateErr
+        if (!updated?.length) {
+          throw new Error('This application could not be approved. It may no longer be pending.')
+        }
+
+        const { data: existing } = await supabase
+          .from('message_threads')
+          .select('id')
+          .eq('tenant_id', match.tenantId)
+          .eq('landlord_id', user.id)
+          .maybeSingle()
+
+        if (existing) {
+          const { error: touchErr } = await supabase
+            .from('message_threads')
+            .update({
+              property_id: match.propertyId,
+              application_id: match.applicationId,
+            })
+            .eq('id', existing.id)
+          if (touchErr) throw touchErr
+        } else {
+          const { error: insertErr } = await supabase.from('message_threads').insert({
+            application_id: match.applicationId,
+            tenant_id: match.tenantId,
+            landlord_id: user.id,
+            property_id: match.propertyId,
+          })
+          if (insertErr) throw insertErr
+        }
+
+        await reloadLandlordMatchesData()
+      } catch (e) {
+        setLandlordCardError({
+          cardId: match.id,
+          message: e instanceof Error ? e.message : 'Could not approve',
+        })
+      } finally {
+        setLandlordCardBusyId(null)
+      }
+    },
+    [user, reloadLandlordMatchesData],
+  )
+
+  const handleLandlordCardDecline = useCallback(
+    async (match: LandlordMatchCard) => {
+      if (!user || !match.applicationId) return
+      setLandlordCardError(null)
+      setLandlordCardBusyId(match.id)
+      try {
+        const { data: updated, error } = await supabase
+          .from('applications')
+          .update({ status: 'rejected' })
+          .eq('id', match.applicationId)
+          .eq('status', 'pending')
+          .not('unlocked_at', 'is', null)
+          .select('id')
+        if (error) throw error
+        if (!updated?.length) {
+          throw new Error('This application could not be declined. It may no longer be pending.')
+        }
+        await reloadLandlordMatchesData()
+      } catch (e) {
+        setLandlordCardError({
+          cardId: match.id,
+          message: e instanceof Error ? e.message : 'Could not decline',
+        })
+      } finally {
+        setLandlordCardBusyId(null)
+      }
+    },
+    [user, reloadLandlordMatchesData],
+  )
+
+  // Load match scores for landlord applicant list
+  useEffect(() => {
+    if (profileRole !== 'landlord' || !user || landlordMatches.length === 0) return
+    let cancelled = false
+    setMatchLoading(true)
+    ;(async () => {
+      const { data: { session } } = await supabase.auth.getSession()
+      const token = session?.access_token
+      if (!token || cancelled) return
+      try {
+        const tenantIds = landlordMatches.map((m) => m.tenantId).filter(Boolean)
+        if (tenantIds.length === 0) { if (!cancelled) setMatchLoading(false); return }
+        const matches = await fetchMatchesForLandlord(token, user.id, tenantIds)
+        if (!cancelled) setMatchByTenantId(matches)
+      } catch {
+        if (!cancelled) setMatchByTenantId({})
+      } finally {
+        if (!cancelled) setMatchLoading(false)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [user, profileRole, landlordMatches])
+
   useEffect(() => {
     if (!user) {
       setLoading(false)
@@ -229,9 +922,8 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
     } else {
       loadLandlordProperties().then((props) => {
         const ids = props?.map((p) => p.id) ?? []
-        const targetIds = landlordProperty && ids.includes(landlordProperty)
-          ? [landlordProperty]
-          : ids
+        const targetIds =
+          landlordProperty && ids.includes(landlordProperty) ? [landlordProperty] : ids
         if (targetIds.length > 0) {
           loadLandlordMatches(targetIds).finally(() => setLoading(false))
         } else {
@@ -243,7 +935,16 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
         setLoading(false)
       })
     }
-  }, [user, roleLoading, profileRole, landlordProperty, loadTenantMatches, loadAppliedIds, loadLandlordMatches, loadLandlordProperties])
+  }, [
+    user,
+    roleLoading,
+    profileRole,
+    landlordProperty,
+    loadTenantMatches,
+    loadAppliedIds,
+    loadLandlordMatches,
+    loadLandlordProperties,
+  ])
 
   const toggleAmenity = (key: keyof typeof amenities) =>
     setAmenities((prev) => ({ ...prev, [key]: !prev[key] }))
@@ -260,11 +961,17 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
 
   const handleApplyNow = async (match: MatchCard) => {
     if (!user) return
+
+    // If the tenant does not have an active universal application, send them to the application page
+    if (hasActiveUniversalApplication === false) {
+      navigate('/applications/apply')
+      return
+    }
+
     const { error } = await supabase.from('applications').insert({
       tenant_id: user.id,
       property_id: match.id,
       status: 'pending',
-      message: null,
     })
     if (error && error.code !== '23505') {
       setError(error.message)
@@ -274,9 +981,12 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
     setSubmissionModal({ propertyTitle: match.title })
   }
 
-  const displayedMatches = activeTab === 'saved'
-    ? tenantMatches.filter((m) => savedIds.has(m.id))
-    : tenantMatches
+  const displayedMatches =
+    activeTab === 'saved'
+      ? tenantMatches.filter((m) => savedIds.has(m.id))
+      : activeTab === 'applied'
+        ? tenantMatches.filter((m) => appliedIds.has(m.id))
+        : tenantMatches
 
   const filteredMatches = useMemo(() => {
     let list = displayedMatches
@@ -296,11 +1006,113 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
     return list
   }, [displayedMatches, bedrooms, priceRange, amenities])
 
-  const hasMatches = filteredMatches.length > 0
-  const displayedLandlordMatches =
-    landlordFilter === 'all'
-      ? landlordMatches
-      : landlordMatches.filter((match) => match.status === landlordFilter)
+  // Tenant: only show properties that are actual matches (eligible), sorted by score, top N only
+  const matchesToShow = useMemo(() => {
+    if (profileRole !== 'tenant' || tenantOverallScore == null) return []
+    if (activeTab === 'applied') {
+      return [...filteredMatches].sort(
+        (a, b) => (matchByPropertyId[b.id]?.overall ?? 0) - (matchByPropertyId[a.id]?.overall ?? 0),
+      )
+    }
+    const withScores = filteredMatches.filter((m) => matchByPropertyId[m.id]?.eligible === true)
+    const sorted = [...withScores].sort(
+      (a, b) => (matchByPropertyId[b.id]?.overall ?? 0) - (matchByPropertyId[a.id]?.overall ?? 0),
+    )
+    return sorted.slice(0, MAX_TENANT_TOP_MATCHES)
+  }, [profileRole, tenantOverallScore, activeTab, filteredMatches, matchByPropertyId])
+
+  const tenantMatchScoreIdsKey = useMemo(
+    () => filteredMatches.map((m) => m.id).slice().sort().join('|'),
+    [filteredMatches],
+  )
+
+  useEffect(() => {
+    if (profileRole !== 'tenant' || !user || tenantOverallScore == null) return
+    if (filteredMatches.length === 0) {
+      setMatchByPropertyId({})
+      setMatchLoading(false)
+      return
+    }
+    let cancelled = false
+    setMatchLoading(true)
+    ;(async () => {
+      const { data: { session } } = await supabase.auth.getSession()
+      const token = session?.access_token
+      if (!token || cancelled) {
+        if (!cancelled) setMatchLoading(false)
+        return
+      }
+      const ids = filteredMatches.map((m) => m.id)
+      try {
+        const matches = await fetchMatchesForTenant(token, user.id, ids, { limit: MAX_TENANT_TOP_MATCHES })
+        if (!cancelled) setMatchByPropertyId(matches)
+      } catch {
+        if (!cancelled) setMatchByPropertyId({})
+      } finally {
+        if (!cancelled) setMatchLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [user, profileRole, tenantOverallScore, tenantMatchScoreIdsKey])
+
+  const hasMatches = profileRole === 'tenant' && tenantOverallScore != null ? matchesToShow.length > 0 : filteredMatches.length > 0
+  const statusFilteredLandlordMatches = landlordMatches.filter((match) => {
+    if (landlordFilter === 'all') return true
+    if (landlordFilter === 'applications') return match.hasApplication
+    if (landlordFilter === 'prospects') return !match.hasApplication
+    return match.hasApplication && effectiveLandlordWorkflowStatus(match) === landlordFilter
+  })
+  const tenantScopedLandlordMatches = landlordMatchesTenantId
+    ? statusFilteredLandlordMatches.filter((m) => m.tenantId === landlordMatchesTenantId)
+    : statusFilteredLandlordMatches
+  const displayedLandlordMatches = tenantScopedLandlordMatches
+
+  const landlordTenantDropdownOptions = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const m of statusFilteredLandlordMatches) {
+      if (!map.has(m.tenantId)) map.set(m.tenantId, m.name)
+    }
+    if (landlordMatchesTenantId && !map.has(landlordMatchesTenantId)) {
+      const name =
+        landlordMatches.find((m) => m.tenantId === landlordMatchesTenantId)?.name ?? 'Tenant'
+      map.set(landlordMatchesTenantId, name)
+    }
+    return [...map.entries()].sort((a, b) =>
+      a[1].localeCompare(b[1], undefined, { sensitivity: 'base' }),
+    )
+  }, [statusFilteredLandlordMatches, landlordMatchesTenantId, landlordMatches])
+  const landlordTotalPages = Math.max(1, Math.ceil(displayedLandlordMatches.length / MATCHES_PAGE_SIZE))
+  const landlordPageStart = (landlordPage - 1) * MATCHES_PAGE_SIZE
+  const paginatedLandlordMatches = displayedLandlordMatches.slice(
+    landlordPageStart,
+    landlordPageStart + MATCHES_PAGE_SIZE,
+  )
+  const tenantBaseMatches =
+    profileRole === 'tenant' && tenantOverallScore != null ? matchesToShow : filteredMatches
+  const tenantTotalPages = Math.max(1, Math.ceil(tenantBaseMatches.length / TENANT_MATCHES_PAGE_SIZE))
+  const tenantPageStart = (tenantPage - 1) * TENANT_MATCHES_PAGE_SIZE
+  const paginatedTenantMatches = tenantBaseMatches.slice(
+    tenantPageStart,
+    tenantPageStart + TENANT_MATCHES_PAGE_SIZE,
+  )
+
+  useEffect(() => {
+    setLandlordPage(1)
+  }, [landlordFilter, landlordProperty, landlordMatchesTenantId])
+
+  useEffect(() => {
+    if (landlordPage > landlordTotalPages) setLandlordPage(landlordTotalPages)
+  }, [landlordPage, landlordTotalPages])
+
+  useEffect(() => {
+    setTenantPage(1)
+  }, [activeTab, bedrooms, priceRange, amenities])
+
+  useEffect(() => {
+    if (tenantPage > tenantTotalPages) setTenantPage(tenantTotalPages)
+  }, [tenantPage, tenantTotalPages])
 
   if (roleLoading || profileRole === null) {
     return (
@@ -389,52 +1201,99 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
               </ul>
             </div>
           ) : null}
-          <div className="rounded-xl border border-gray-200 bg-white p-3">
-            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-                <div className="relative min-w-[210px]">
-                  <select
-                    value={landlordProperty}
-                    onChange={(event) => setLandlordProperty(event.target.value)}
-                    className="w-full appearance-none rounded-lg border border-gray-200 bg-white px-4 py-2.5 pr-10 text-sm text-gray-700 focus:border-gray-300 focus:outline-none"
-                  >
-                    <option value="">All Properties</option>
-                    {landlordProperties.map((p) => (
-                      <option key={p.id} value={p.id}>{p.label}</option>
-                    ))}
-                  </select>
-                  <svg className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                  </svg>
-                </div>
-
-                <div className="flex flex-wrap gap-2">
-                  {([
-                    { value: 'all', label: 'All' },
-                    { value: 'unlocked', label: 'Unlocked' },
-                    { value: 'locked', label: 'Locked' },
-                    { value: 'accepted', label: 'Accepted' },
-                    { value: 'declined', label: 'Declined' },
-                  ] as const).map((item) => (
-                    <button
-                      key={item.value}
-                      type="button"
-                      onClick={() => setLandlordFilter(item.value)}
-                      className={`rounded-full px-3 py-1.5 text-xs transition-colors ${
-                        landlordFilter === item.value
-                          ? 'bg-gray-900 text-white'
-                          : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                      }`}
+          <div className="rounded-xl border border-gray-200 bg-white p-4">
+            <div className="flex flex-col gap-4">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+                <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
+                  <span className="shrink-0 text-xs font-semibold uppercase tracking-wide text-gray-500 sm:w-24">
+                    Property
+                  </span>
+                  <div className="relative min-w-[min(100%,16rem)] max-w-md flex-1 sm:min-w-[14rem]">
+                    <select
+                      value={landlordProperty}
+                      onChange={(event) => setLandlordProperty(event.target.value)}
+                      className="w-full appearance-none rounded-lg border border-gray-200 bg-white px-4 py-2.5 pr-10 text-sm text-gray-700 focus:border-gray-300 focus:outline-none"
                     >
-                      {item.label}
-                    </button>
-                  ))}
+                      <option value="">All properties</option>
+                      {landlordProperties.map((p) => (
+                        <option key={p.id} value={p.id}>{p.label}</option>
+                      ))}
+                    </select>
+                    <svg className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </div>
+                </div>
+                <p className="shrink-0 text-sm text-gray-500 sm:text-right">
+                  {loading ? 'Loading...' : `${displayedLandlordMatches.length} matches`}
+                </p>
+              </div>
+
+              <div className="border-t border-gray-100 pt-4">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:gap-4">
+                  <span className="shrink-0 pt-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500 sm:w-24">
+                    Matches
+                  </span>
+                  <div className="flex min-w-0 flex-1 flex-wrap gap-2">
+                    {([
+                      { value: 'all' as const, label: 'All' },
+                      { value: 'applications' as const, label: 'Applications' },
+                      { value: 'prospects' as const, label: 'Prospects' },
+                      { value: 'locked' as const, label: 'Locked' },
+                      { value: 'unlocked' as const, label: 'Unlocked' },
+                      { value: 'accepted' as const, label: 'Accepted' },
+                      { value: 'declined' as const, label: 'Declined' },
+                    ] as const).map((item) => (
+                      <button
+                        key={item.value}
+                        type="button"
+                        onClick={() => setLandlordFilter(item.value)}
+                        className={`rounded-full px-3 py-1.5 text-xs transition-colors ${
+                          landlordFilter === item.value
+                            ? 'bg-gray-900 text-white'
+                            : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                        }`}
+                      >
+                        {item.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
 
-              <p className="text-sm text-gray-500">
-                {loading ? 'Loading...' : `${displayedLandlordMatches.length} matches found`}
-              </p>
+              <div className="border-t border-gray-100 pt-4">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
+                  <span className="shrink-0 text-xs font-semibold uppercase tracking-wide text-gray-500 sm:w-24 sm:pt-0">
+                    Tenant
+                  </span>
+                  <div className="relative min-w-[min(100%,16rem)] max-w-md flex-1 sm:min-w-[14rem]">
+                    <select
+                      value={landlordMatchesTenantId ?? ''}
+                      onChange={(event) => {
+                        const v = event.target.value
+                        setSearchParams(
+                          (prev) => {
+                            const next = new URLSearchParams(prev)
+                            if (!v) next.delete('tenant')
+                            else next.set('tenant', v)
+                            return next
+                          },
+                          { replace: true },
+                        )
+                      }}
+                      className="w-full appearance-none rounded-lg border border-gray-200 bg-white px-4 py-2.5 pr-10 text-sm text-gray-700 focus:border-gray-300 focus:outline-none"
+                    >
+                      <option value="">All tenants</option>
+                      {landlordTenantDropdownOptions.map(([tid, label]) => (
+                        <option key={tid} value={tid}>{label}</option>
+                      ))}
+                    </select>
+                    <svg className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -444,118 +1303,205 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
             </div>
           ) : (
           <>
-          <div className="mt-8 grid gap-5 lg:grid-cols-2">
-            {displayedLandlordMatches.slice(0, landlordMatchesShown).map((match) => (
-              <div key={match.id} className="rounded-xl border border-gray-200 bg-white p-4">
-                <div className="flex items-start justify-between gap-4">
+          <div className="mt-8 grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-3">
+            {paginatedLandlordMatches.map((match) => {
+              const workflow = effectiveLandlordWorkflowStatus(match)
+              return (
+              <div
+                key={match.id}
+                className="flex h-full flex-col rounded-xl border border-gray-200 bg-white p-4"
+              >
                 <Link
-                  to={`/matches/tenant/${match.tenantId}${
-                    match.status === 'declined'
-                      ? '?mode=full&status=declined'
-                      : match.status === 'accepted'
-                        ? '?mode=full&status=accepted'
-                        : match.status === 'locked'
-                          ? ''
-                          : '?mode=full'
-                  }`}
-                  className="flex items-start gap-3 rounded-lg hover:opacity-90"
+                  to={landlordTenantProfilePath(match)}
+                  state={tenantProfileNavState}
+                  className="group flex min-h-0 flex-1 flex-col rounded-lg text-left outline-none focus-visible:ring-2 focus-visible:ring-gray-400 focus-visible:ring-offset-2"
                 >
-                  <LandlordAvatar name={match.name} />
-                  <div>
-                    <p className="text-[1.15rem] font-medium text-gray-900">{match.name}</p>
-                    <p className="mt-0.5 text-sm text-gray-500">{match.appliedAgo}</p>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex min-w-0 flex-1 items-start gap-3">
+                      <LandlordAvatar name={match.name} avatarUrl={match.avatarUrl} />
+                      <div className="min-w-0">
+                        <p className="text-[1.15rem] font-medium text-gray-900 group-hover:underline decoration-gray-400 underline-offset-2">
+                          {match.name}
+                        </p>
+                        <p className="mt-0.5 text-sm font-medium text-gray-700">{match.listingLabel}</p>
+                        <p className="mt-0.5 text-sm text-gray-500">{match.appliedAgo}</p>
+                      </div>
+                    </div>
+                    <span
+                      className={`shrink-0 rounded-full px-3 py-1 text-xs font-medium ${
+                        !match.hasApplication
+                          ? 'bg-gray-100 text-gray-600'
+                          : workflow === 'declined'
+                            ? 'bg-red-50 text-red-700'
+                            : workflow === 'accepted'
+                              ? 'bg-emerald-50 text-emerald-800'
+                              : workflow === 'unlocked'
+                                ? 'bg-sky-50 text-sky-800'
+                                : 'bg-gray-100 text-gray-600'
+                      }`}
+                    >
+                      {match.hasApplication ? LANDLORD_MATCH_STATUS_LABEL[workflow] : 'No application'}
+                    </span>
+                  </div>
+
+                  <div className="mt-5 flex min-h-0 flex-1 flex-col">
+                    <div className="space-y-3 text-sm">
+                      {(() => {
+                        const matchData = match.matchPreview ?? matchByTenantId[match.tenantId]
+                        if (matchLoading && !matchData) {
+                          return <div className="text-gray-500">Loading match data…</div>
+                        }
+                        if (matchData) {
+                          return (
+                            <>
+                              {matchData.eligible && matchData.dimensions ? (
+                                <MatchScoreDisplay
+                                  overall={matchData.overall}
+                                  dimensions={matchData.dimensions}
+                                  compact
+                                  showQuestionnaireIncomeHint={false}
+                                />
+                              ) : (
+                                <div className="flex items-start justify-between gap-6">
+                                  <span className="text-gray-500">Match score</span>
+                                  <span className="text-amber-700 text-xs">Not eligible</span>
+                                </div>
+                              )}
+                              <div className="flex items-start justify-between gap-6">
+                                <span className="text-gray-500">Tenant score</span>
+                                <span className="text-right text-gray-900">
+                                  {matchData.tenantScore != null ? String(matchData.tenantScore) : '—'}
+                                </span>
+                              </div>
+                              <div className="flex items-start justify-between gap-6">
+                                <span className="text-gray-500">Credit score</span>
+                                <span className="text-right text-gray-900">{match.creditScore}</span>
+                              </div>
+                              <div className="flex items-start justify-between gap-6">
+                                <span className="text-gray-500">Lease intent</span>
+                                <span className="text-right text-gray-900">{match.leaseIntent}</span>
+                              </div>
+                            </>
+                          )
+                        }
+                        return (
+                          <>
+                            <div className="flex items-start justify-between gap-6">
+                              <span className="text-gray-500">Compatibility Summary</span>
+                              <span className="text-right text-gray-900">{match.compatibilitySummary}</span>
+                            </div>
+                            <div className="flex items-start justify-between gap-6">
+                              <span className="text-gray-500">Credit Score</span>
+                              <span className="text-right text-gray-900">{match.creditScore}</span>
+                            </div>
+                            <div className="flex items-start justify-between gap-6">
+                              <span className="text-gray-500">Tenant Score</span>
+                              <span className="text-right text-gray-900">{match.tenantScore}</span>
+                            </div>
+                            <div className="flex items-start justify-between gap-6">
+                              <span className="text-gray-500">Lease Intent</span>
+                              <span className="text-right text-gray-900">{match.leaseIntent}</span>
+                            </div>
+                          </>
+                        )
+                      })()}
+                    </div>
                   </div>
                 </Link>
 
-                  <span
-                    className={`rounded-full px-3 py-1 text-xs ${
-                      match.status === 'declined'
-                        ? 'bg-red-50 text-red-700'
-                        : 'bg-gray-100 text-gray-600'
-                    }`}
-                  >
-                    {match.status.charAt(0).toUpperCase() + match.status.slice(1)}
-                  </span>
-                </div>
-
-                <div className="mt-5 space-y-3 text-sm">
-                  <div className="flex items-start justify-between gap-6">
-                    <span className="text-gray-500">Compatibility Summary</span>
-                    <span className="text-right text-gray-900">{match.compatibilitySummary}</span>
-                  </div>
-                  <div className="flex items-start justify-between gap-6">
-                    <span className="text-gray-500">Credit Score</span>
-                    <span className="text-right text-gray-900">{match.creditScore}</span>
-                  </div>
-                  <div className="flex items-start justify-between gap-6">
-                    <span className="text-gray-500">Tenant Score</span>
-                    <span className="text-right text-gray-900">{match.tenantScore}</span>
-                  </div>
-                  <div className="flex items-start justify-between gap-6">
-                    <span className="text-gray-500">Lease Intent</span>
-                    <span className="text-right text-gray-900">{match.leaseIntent}</span>
-                  </div>
-                </div>
-
-                <div className="mt-5">
-                  {match.status === 'locked' ? (
-                    <button
-                      type="button"
-                      onClick={() => setUnlockModalMatch(match)}
-                      className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-gray-900 px-4 py-3 text-sm font-medium text-white hover:bg-gray-800"
-                    >
-                      <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 11c1.657 0 3-1.343 3-3V7a3 3 0 10-6 0v1c0 1.657 1.343 3 3 3zm-7 9h14a2 2 0 002-2v-5a2 2 0 00-2-2H5a2 2 0 00-2 2v5a2 2 0 002 2z" />
-                      </svg>
-                      Unlock Match
-                    </button>
-                  ) : null}
-
-                  {match.status === 'unlocked' ? (
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <Link
-                        to={`/matches/tenant/${match.tenantId}?mode=full`}
-                        className="inline-flex items-center justify-center rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm font-medium text-gray-600 hover:bg-gray-50"
-                      >
-                        Decline
-                      </Link>
-                      <Link
-                        to={`/matches/tenant/${match.tenantId}?mode=full`}
-                        className="inline-flex items-center justify-center rounded-lg bg-gray-900 px-4 py-3 text-sm font-medium text-white hover:bg-gray-800"
-                      >
-                        Accept
-                      </Link>
+                {match.hasApplication &&
+                (workflow === 'locked' || workflow === 'declined' || workflow === 'unlocked') ? (
+                  <div className="mt-4 border-t border-gray-100 pt-4">
+                    {landlordCardError?.cardId === match.id ? (
+                      <p className="mb-3 text-sm text-red-600">{landlordCardError.message}</p>
+                    ) : null}
+                    <div className="flex w-full flex-col gap-2">
+                      {workflow === 'locked' ? (
+                        <button
+                          type="button"
+                          onClick={() => handleLandlordCardUnlock(match)}
+                          disabled={landlordCardBusyId !== null}
+                          className="inline-flex min-h-[44px] w-full items-center justify-center rounded-lg bg-gray-900 px-4 py-3 text-sm font-medium text-white hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {landlordCardBusyId === match.id ? 'Unlocking…' : 'Unlock profile'}
+                        </button>
+                      ) : null}
+                      {workflow === 'unlocked' ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => handleLandlordCardApprove(match)}
+                            disabled={landlordCardBusyId !== null}
+                            className="inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-lg bg-gray-900 px-4 py-3 text-sm font-medium text-white hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {landlordCardBusyId === match.id ? (
+                              'Approving…'
+                            ) : (
+                              <>
+                                <svg className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                </svg>
+                                Approve
+                              </>
+                            )}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleLandlordCardDecline(match)}
+                            disabled={landlordCardBusyId !== null}
+                            className="inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm font-medium text-gray-800 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {landlordCardBusyId === match.id ? (
+                              'Declining…'
+                            ) : (
+                              <>
+                                <svg className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                                Decline
+                              </>
+                            )}
+                          </button>
+                        </>
+                      ) : null}
+                      {workflow === 'declined' ? (
+                        <button
+                          type="button"
+                          onClick={() => handleLandlordCardUndoDecline(match)}
+                          disabled={landlordCardBusyId !== null}
+                          className="inline-flex min-h-[44px] w-full items-center justify-center rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm font-medium text-gray-800 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {landlordCardBusyId === match.id ? 'Restoring…' : 'Undo decline'}
+                        </button>
+                      ) : null}
                     </div>
-                  ) : null}
-
-                  {match.status === 'accepted' ? (
-                    <button
-                      type="button"
-                      className="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm font-medium text-gray-700 hover:bg-gray-50"
-                    >
-                      <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4-.8L3 20l1.385-3.231C3.512 15.477 3 13.79 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-                      </svg>
-                      Message Tenant
-                    </button>
-                  ) : null}
-
-                  {match.status === 'declined' ? (
-                    <p className="py-2 text-center text-sm text-gray-500">Application declined</p>
-                  ) : null}
-                </div>
+                  </div>
+                ) : null}
               </div>
-            ))}
+              )
+            })}
           </div>
 
-          {displayedLandlordMatches.length > landlordMatchesShown ? (
-            <div className="mt-8 flex justify-center">
+          {displayedLandlordMatches.length > MATCHES_PAGE_SIZE ? (
+            <div className="mt-8 flex items-center justify-center gap-3">
               <button
                 type="button"
-                onClick={() => setLandlordMatchesShown((n) => n + MATCHES_PAGE_SIZE)}
-                className="rounded-lg border border-gray-200 bg-white px-5 py-3 text-sm text-gray-700 hover:bg-gray-50"
+                onClick={() => setLandlordPage((p) => Math.max(1, p - 1))}
+                disabled={landlordPage === 1}
+                className="rounded-lg border border-gray-200 bg-white px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                Load More Matches
+                Previous
+              </button>
+              <span className="text-sm text-gray-600">
+                Page {landlordPage} of {landlordTotalPages}
+              </span>
+              <button
+                type="button"
+                onClick={() => setLandlordPage((p) => Math.min(landlordTotalPages, p + 1))}
+                disabled={landlordPage === landlordTotalPages}
+                className="rounded-lg border border-gray-200 bg-white px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Next
               </button>
             </div>
           ) : null}
@@ -565,87 +1511,47 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
 
         </div>
 
-        {unlockModalMatch ? (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 px-4 py-8">
-            <div className="w-full max-w-[320px] overflow-hidden rounded-2xl bg-white shadow-2xl">
-              <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4">
-                <h2 className="text-[1.35rem] font-medium text-gray-900">Unlock Tenant Profile</h2>
-                <button
-                  type="button"
-                  onClick={() => setUnlockModalMatch(null)}
-                  className="text-gray-400 hover:text-gray-600"
-                  aria-label="Close unlock modal"
-                >
-                  <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              </div>
-
-              <div className="px-5 py-4">
-                <div className="text-center">
-                  <p className="text-[2.25rem] font-medium leading-none text-gray-900">$9.99</p>
-                  <p className="mt-2 text-sm text-gray-500">One-time unlock</p>
-                </div>
-
-                <p className="mt-5 text-sm leading-7 text-gray-600">
-                  Unlock this tenant&apos;s full profile including rental history, personality fit, and contact info.
-                </p>
-
-                <ul className="mt-5 space-y-2 text-sm text-gray-600">
-                  {[
-                    'Complete rental history',
-                    'Personality compatibility details',
-                    'Direct contact information',
-                    'Employment verification',
-                  ].map((item) => (
-                    <li key={item} className="flex items-start gap-2">
-                      <svg className="mt-1 h-4 w-4 flex-shrink-0 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                      </svg>
-                      <span>{item}</span>
-                    </li>
-                  ))}
-                </ul>
-
-                <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                  <button
-                    type="button"
-                    onClick={() => setUnlockModalMatch(null)}
-                    className="rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm font-medium text-gray-600 hover:bg-gray-50"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (!unlockModalMatch) return
-                      setUnlockModalMatch(null)
-                      navigate(`/matches/tenant/${unlockModalMatch.tenantId}?mode=full`)
-                    }}
-                    className="inline-flex items-center justify-center gap-2 rounded-lg bg-gray-900 px-4 py-3 text-sm font-medium text-white hover:bg-gray-800"
-                  >
-                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 11c1.657 0 3-1.343 3-3V7a3 3 0 10-6 0v1c0 1.657 1.343 3 3 3zm-7 9h14a2 2 0 002-2v-5a2 2 0 00-2-2H5a2 2 0 00-2 2v5a2 2 0 002 2z" />
-                    </svg>
-                    Confirm & Unlock
-                  </button>
-                </div>
-
-                <p className="mt-4 text-center text-[11px] leading-5 text-gray-400">
-                  Your payment is processed through Stripe and is non-refundable once profile is viewed.
-                </p>
-              </div>
-            </div>
-          </div>
-        ) : null}
       </>
+    )
+  }
+
+  // Tenant: lease prefs done but questionnaire not done → show CTA to complete questionnaire to see matches
+  if (
+    tenantSurveyCompletedAt &&
+    profileRole === 'tenant' &&
+    tenantOverallScore == null &&
+    !roleLoading &&
+    !tenantQuestionnaireLoading
+  ) {
+    return (
+      <div className="space-y-6">
+        <div className="mx-auto max-w-2xl rounded-2xl border border-gray-200 bg-white p-8 shadow-sm text-center">
+          <h2 className="text-xl font-semibold text-gray-900">See your matches</h2>
+          <p className="mt-2 text-sm text-gray-600">
+            Complete the short questionnaire so we can show you properties that match your profile and preferences.
+          </p>
+          <Link
+            to="/tenant-questionnaire"
+            className="mt-6 inline-flex items-center gap-2 rounded-lg bg-gray-900 px-6 py-3 text-sm font-medium text-white hover:bg-gray-800"
+          >
+            Complete questionnaire
+            <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+            </svg>
+          </Link>
+        </div>
+      </div>
     )
   }
 
   return (
     <div className="space-y-6">
       {!tenantSurveyCompletedAt ? (
+        !tenantSurveyRefetched ? (
+          <div className="flex min-h-[40vh] items-center justify-center px-4 py-8">
+            <p className="text-sm text-gray-500">Loading...</p>
+          </div>
+        ) : (
         <div className="mx-auto max-w-2xl rounded-2xl border border-gray-200 bg-white p-8 shadow-sm">
           <div className="flex flex-col items-center text-center">
             <div className="flex h-16 w-16 items-center justify-center rounded-lg bg-gray-900 text-white">
@@ -666,37 +1572,7 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
             </p>
           </div>
 
-          <div className="mt-8 grid gap-4 sm:grid-cols-3">
-            <div className="rounded-lg border border-gray-100 bg-gray-50/50 p-4 text-center">
-              <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-full bg-white text-gray-700 shadow-sm">
-                <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" />
-                </svg>
-              </div>
-              <p className="mt-3 text-sm font-medium text-gray-900">Better Matches</p>
-              <p className="mt-1 text-xs leading-5 text-gray-600">We&apos;ll show you properties that fit your budget and needs.</p>
-            </div>
-            <div className="rounded-lg border border-gray-100 bg-gray-50/50 p-4 text-center">
-              <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-full bg-white text-gray-700 shadow-sm">
-                <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-              </div>
-              <p className="mt-3 text-sm font-medium text-gray-900">Save Time</p>
-              <p className="mt-1 text-xs leading-5 text-gray-600">Skip listings that won&apos;t work for your timeline or situation.</p>
-            </div>
-            <div className="rounded-lg border border-gray-100 bg-gray-50/50 p-4 text-center">
-              <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-full bg-white text-gray-700 shadow-sm">
-                <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
-              </div>
-              <p className="mt-3 text-sm font-medium text-gray-900">Higher Success</p>
-              <p className="mt-1 text-xs leading-5 text-gray-600">Increase your chances of finding and securing the right place.</p>
-            </div>
-          </div>
-
-          <div className="mt-8 flex flex-col gap-4 rounded-xl border border-gray-200 bg-gray-50/50 p-5 sm:flex-row sm:items-start sm:justify-between">
+          <div className="mt-8 rounded-xl border border-gray-200 bg-gray-50/50 p-5">
             <div>
               <p className="flex items-center gap-2 text-sm font-medium text-gray-900">
                 <svg className="h-4 w-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -715,17 +1591,12 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
                 ))}
               </ul>
             </div>
-            <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-gray-200/80 px-3 py-1.5 text-xs font-medium text-gray-600">
-              <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              Under 2 min
-            </span>
           </div>
 
           <div className="mt-6 text-center">
             <Link
-              to="/onboarding/lease-preferences"
+              to="/lease-preferences"
+              state={{ from: 'matches' }}
               className="inline-flex items-center gap-2 rounded-lg bg-gray-900 px-6 py-3 text-sm font-medium text-white hover:bg-gray-800"
             >
               Set your preferences
@@ -737,21 +1608,8 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
               Required to view property matches. You can update your preferences anytime from your profile.
             </p>
           </div>
-
-          <div className="mt-6 flex items-start gap-3 rounded-xl border border-gray-200 bg-gray-50 px-4 py-4">
-            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gray-200 text-gray-600">
-              <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-            </div>
-            <div>
-              <p className="text-sm font-medium text-gray-900">Preferences required</p>
-              <p className="mt-1 text-sm leading-6 text-gray-600">
-                Set your lease preferences to view property matches and apply to listings.
-              </p>
-            </div>
-          </div>
         </div>
+        )
       ) : null}
       {tenantSurveyCompletedAt ? (
       <>
@@ -759,30 +1617,135 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Your Matches</h1>
           <p className="text-gray-600 mt-1">
-            Properties matched based on your preferences and compatibility.
+            {activeTab === 'applied'
+              ? 'Properties you’ve applied to. Adjust filters above to narrow the list.'
+              : 'Properties matched based on your preferences and compatibility.'}
           </p>
         </div>
-        <div className="flex-shrink-0 bg-white rounded-xl border border-gray-200 p-4 min-w-[140px]">
-          <div className="flex items-center gap-1.5 mb-2">
-            <span className="text-sm font-medium text-gray-700">Rent Score</span>
-            <button type="button" className="text-gray-400 hover:text-gray-600" aria-label="Rent Score info">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-            </button>
-          </div>
-          <div className="flex justify-center">
-            <div className="flex h-16 w-16 items-center justify-center rounded-full border-[4px] border-emerald-500 text-2xl font-semibold text-gray-800">
-              85
+        {profileRole === 'tenant' && (
+          <div ref={rentScoreCardRef} className="relative flex-shrink-0 bg-white rounded-xl border border-gray-200 p-4 min-w-[140px]">
+            <div className="flex items-center gap-1.5 mb-2">
+              <span className="text-sm font-medium text-gray-700">Rent Score</span>
+              {tenantOverallScore != null ? (
+                <button
+                  type="button"
+                  onClick={() => setRentScoreBreakdownOpen((v) => !v)}
+                  className="rounded-full p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+                  aria-label="Show score breakdown"
+                  title="See breakdown"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                </button>
+              ) : (
+                <Link
+                  to="/tenant-questionnaire"
+                  className="text-gray-400 hover:text-gray-600"
+                  aria-label="Complete questionnaire for personalized score"
+                  title="Complete the questionnaire for a personalized score"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                </Link>
+              )}
             </div>
+            <div className="flex justify-center">
+              {tenantOverallScore != null ? (
+                <div className="flex h-16 w-16 items-center justify-center rounded-full border-[4px] border-emerald-500 text-2xl font-semibold text-gray-800">
+                  {tenantOverallScore}
+                </div>
+              ) : (
+                <Link
+                  to="/tenant-questionnaire"
+                  className="flex h-16 w-16 items-center justify-center rounded-full border-2 border-dashed border-gray-300 text-sm font-medium text-gray-500 hover:border-gray-400 hover:text-gray-600"
+                >
+                  —
+                </Link>
+              )}
+            </div>
+            {rentScoreBreakdownOpen && tenantOverallScore != null &&
+              createPortal(
+                <>
+                  <div
+                    className="fixed inset-0 z-[100] bg-black/20"
+                    aria-hidden
+                    onClick={() => setRentScoreBreakdownOpen(false)}
+                  />
+                  <div
+                    className="fixed z-[101] w-[min(20rem,calc(100vw-2rem)) rounded-xl border border-gray-200 bg-white p-4 shadow-xl"
+                    style={{
+                      left: '50%',
+                      top: '50%',
+                      transform: 'translate(-50%, -50%)',
+                    }}
+                    role="dialog"
+                    aria-labelledby="rent-score-breakdown-title"
+                  >
+                    <div className="flex items-center justify-between gap-2 mb-3">
+                      <span id="rent-score-breakdown-title" className="font-semibold text-gray-900">Rent Score breakdown</span>
+                      <button
+                        type="button"
+                        onClick={() => setRentScoreBreakdownOpen(false)}
+                        className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+                        aria-label="Close"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap mb-3">
+                      <span className={`inline-flex h-8 w-8 items-center justify-center rounded-full border-2 text-sm font-semibold text-gray-800 ${scoreBarColor(Math.min(100, tenantOverallScore)).border}`}>
+                        {tenantOverallScore}
+                      </span>
+                      <div className="flex-1 min-w-[60px] h-2 overflow-hidden rounded-full bg-gray-200">
+                        <div
+                          className={`h-full rounded-full transition-[width] ${scoreBarColor(Math.min(100, tenantOverallScore)).bg}`}
+                          style={{ width: `${Math.min(100, tenantOverallScore)}%` }}
+                        />
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      {tenantDimensionScores
+                        ? RENT_SCORE_LABELS.map(({ key, emoji, label }) => {
+                            const score = tenantDimensionScores[key] ?? 0
+                            const contribution = getDimensionContribution(key, score)
+                            const maxContribution = getDimensionMaxContribution(key)
+                            return (
+                              <div key={key} className="flex items-center gap-2 text-xs">
+                                <span className="w-5 text-center shrink-0">{emoji}</span>
+                                <span className="text-gray-700 min-w-[8rem]">{label}</span>
+                                <ScoreBar value={contribution} max={maxContribution} />
+                                <span className="text-gray-500 min-w-[8ch] text-right">
+                                  {formatContribution(contribution)} / {formatContribution(maxContribution)}
+                                </span>
+                              </div>
+                            )
+                          })
+                        : (
+                          <p className="text-xs text-gray-500 py-2">Loading dimension scores…</p>
+                        )}
+                    </div>
+                    <p className="mt-3 text-xs text-gray-500">
+                      Based on your questionnaire. Update in{' '}
+                      <Link to="/tenant-questionnaire" className="text-emerald-600 hover:underline" onClick={() => setRentScoreBreakdownOpen(false)}>
+                        questionnaire
+                      </Link>.
+                    </p>
+                  </div>
+                </>,
+                document.body
+              )}
           </div>
-        </div>
+        )}
       </div>
 
-      <div className="flex gap-2 border-b border-gray-200">
+      <div className="flex flex-wrap gap-1 border-b border-gray-200">
         <button
           type="button"
-          onClick={() => setActiveTab('all')}
+          onClick={() => commitTenantMatchesTab('all')}
           className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
             activeTab === 'all'
               ? 'border-gray-900 text-gray-900'
@@ -793,7 +1756,18 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
         </button>
         <button
           type="button"
-          onClick={() => setActiveTab('saved')}
+          onClick={() => commitTenantMatchesTab('applied')}
+          className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
+            activeTab === 'applied'
+              ? 'border-gray-900 text-gray-900'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          Applied
+        </button>
+        <button
+          type="button"
+          onClick={() => commitTenantMatchesTab('saved')}
           className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
             activeTab === 'saved'
               ? 'border-gray-900 text-gray-900'
@@ -843,10 +1817,10 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
         <div className="flex flex-wrap gap-4">
           <span className="text-xs font-medium text-gray-500 self-end mb-1">Amenities</span>
           {[
-            { key: 'petFriendly' as const, label: 'Pet Friendly' },
-            { key: 'parking' as const, label: 'Parking' },
-            { key: 'laundry' as const, label: 'Laundry' },
-            { key: 'gym' as const, label: 'Gym' },
+            { key: 'petFriendly' as const, label: '🐾 Pet-friendly' },
+            { key: 'parking' as const, label: '🅿️ Parking' },
+            { key: 'laundry' as const, label: '🧺 Laundry' },
+            { key: 'gym' as const, label: '🏋️ Gym' },
           ].map(({ key, label }) => (
             <label key={key} className="flex items-center gap-2 cursor-pointer">
               <input
@@ -862,8 +1836,8 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
       </div>
 
       {hasMatches ? (
-        <div className="grid gap-6 sm:grid-cols-2">
-          {filteredMatches.slice(0, tenantMatchesShown).map((match) => {
+        <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 xl:grid-cols-3">
+          {paginatedTenantMatches.map((match) => {
             const isSaved = savedIds.has(match.id)
             const isApplied = appliedIds.has(match.id)
             return (
@@ -872,9 +1846,21 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
                 className="flex flex-col rounded-xl border border-gray-200 bg-white p-4"
               >
                 <div className="mb-4 flex items-start justify-between gap-3">
-                  <div>
+                  <div className="min-w-0">
                     <h3 className="font-semibold text-gray-900">{match.title}</h3>
                     <p className="mt-1 text-[2rem] font-medium leading-none text-gray-900">{match.price}</p>
+                    <p className="mt-2 text-sm text-gray-600">
+                      Listed by{' '}
+                      <Link
+                        to={tenantLandlordProfilePath(match.landlordId, {
+                          propertyId: match.id,
+                          returnTo: `${location.pathname}${location.search}`,
+                        })}
+                        className="font-medium text-gray-900 underline decoration-gray-300 underline-offset-2 hover:text-gray-950"
+                      >
+                        {match.landlordDisplayName?.trim() || 'View landlord profile'}
+                      </Link>
+                    </p>
                   </div>
                   <button
                     type="button"
@@ -899,11 +1885,58 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
                 </div>
 
                 <div className="flex-1 flex flex-col">
-                  <p className="mb-4 text-sm text-gray-700">
-                    <span className="font-semibold text-gray-900">Compatibility:</span>{' '}
-                    {match.compatibility}
-                  </p>
-                  <div className="mb-4 flex flex-wrap gap-4 text-xs text-gray-500">
+                  {(() => {
+                    const matchData = matchByPropertyId[match.id]
+                    if (matchLoading && !matchData) {
+                      return (
+                        <p className="mb-4 text-sm text-gray-500">Loading match score…</p>
+                      )
+                    }
+                    if (matchData) {
+                      const isQuestionnaireMissing = matchData.reasons?.some((r) =>
+                            r.toLowerCase().includes('tenant questionnaire not completed')
+                          ) ?? false
+                      if (isQuestionnaireMissing) {
+                        return (
+                          <div className="mb-4">
+                            <p className="text-sm text-gray-600">
+                              Complete the short questionnaire to see your match score with this property.
+                            </p>
+                            <Link
+                              to="/tenant-questionnaire"
+                              className="mt-2 inline-flex items-center gap-1.5 text-sm font-medium text-emerald-600 hover:text-emerald-700"
+                            >
+                              Complete questionnaire
+                              <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                              </svg>
+                            </Link>
+                          </div>
+                        )
+                      }
+                      return (
+                        <div className="mb-3">
+                          {matchData.eligible && matchData.dimensions ? (
+                            <MatchScoreDisplay
+                              overall={matchData.overall}
+                              dimensions={matchData.dimensions}
+                            />
+                          ) : (
+                            <span className="text-sm text-amber-700">
+                              Not eligible — {matchData.reasons.join(' ')}
+                            </span>
+                          )}
+                        </div>
+                      )
+                    }
+                    return (
+                      <p className="mb-4 text-sm text-gray-700">
+                        <span className="font-semibold text-gray-900">Compatibility:</span>{' '}
+                        {match.compatibility}
+                      </p>
+                    )
+                  })()}
+                  <div className="mt-2 mb-3 flex items-center gap-4 text-xs text-gray-500 whitespace-nowrap overflow-hidden">
                     {match.tags.map((tag) => (
                       <span key={tag}>{tag}</span>
                     ))}
@@ -932,6 +1965,14 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
                       View Property
                     </Link>
                   </div>
+                  {isApplied && applicationIdByPropertyId[match.id] ? (
+                    <Link
+                      to={`/account/application/${applicationIdByPropertyId[match.id]}`}
+                      className="mt-2 block text-center text-sm font-medium text-gray-900 underline decoration-gray-300 underline-offset-2 hover:text-gray-950"
+                    >
+                      Application status
+                    </Link>
+                  ) : null}
                 </div>
               </div>
             )
@@ -939,19 +1980,40 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
         </div>
       ) : null}
 
-      {hasMatches && activeTab === 'all' && filteredMatches.length > tenantMatchesShown ? (
+      {hasMatches &&
+        tenantBaseMatches.length > TENANT_MATCHES_PAGE_SIZE ? (
         <div className="flex justify-center">
-          <button
-            type="button"
-            onClick={() => setTenantMatchesShown((n) => n + MATCHES_PAGE_SIZE)}
-            className="px-6 py-3 border border-gray-300 text-gray-700 font-medium rounded-lg hover:bg-gray-50"
-          >
-            Load More Matches
-          </button>
+          <div className="mt-1 flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setTenantPage((p) => Math.max(1, p - 1))}
+              disabled={tenantPage === 1}
+              className="rounded-lg border border-gray-300 px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Previous
+            </button>
+            <span className="text-sm text-gray-600">
+              Page {tenantPage} of {tenantTotalPages}
+            </span>
+            <button
+              type="button"
+              onClick={() => setTenantPage((p) => Math.min(tenantTotalPages, p + 1))}
+              disabled={tenantPage === tenantTotalPages}
+              className="rounded-lg border border-gray-300 px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Next
+            </button>
+          </div>
         </div>
       ) : null}
 
-      {!hasMatches && (
+      {profileRole === 'tenant' && tenantOverallScore != null && matchLoading && matchesToShow.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-16 px-4 bg-white rounded-xl border border-gray-200">
+          <p className="text-gray-600">Loading your matches…</p>
+        </div>
+      ) : null}
+
+      {!hasMatches && !(profileRole === 'tenant' && tenantOverallScore != null && matchLoading) ? (
         <div className="flex flex-col items-center justify-center py-16 px-4 bg-white rounded-xl border border-gray-200">
           <div className="w-32 h-32 rounded-xl bg-gray-100 flex items-center justify-center mb-6">
             <svg className="w-16 h-16 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -966,7 +2028,7 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
               </p>
               <button
                 type="button"
-                onClick={() => setActiveTab('all')}
+                onClick={() => commitTenantMatchesTab('all')}
                 className="inline-flex items-center gap-2 px-6 py-3 bg-gray-900 text-white font-medium rounded-lg hover:bg-gray-800"
               >
                 Browse Matches
@@ -974,6 +2036,37 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                 </svg>
               </button>
+            </>
+          ) : activeTab === 'applied' ? (
+            <>
+              <h2 className="text-xl font-semibold text-gray-900 mb-2">No applications yet</h2>
+              <p className="text-gray-600 text-center max-w-md mb-8">
+                When you apply to a listing from your matches, it will show up here. You can also open{' '}
+                <Link
+                  to="/account/rental-application"
+                  className="font-medium text-gray-900 underline decoration-gray-300 underline-offset-2 hover:text-gray-950"
+                >
+                  your rental application
+                </Link>{' '}
+                from your profile.
+              </p>
+              <button
+                type="button"
+                onClick={() => commitTenantMatchesTab('all')}
+                className="inline-flex items-center gap-2 px-6 py-3 bg-gray-900 text-white font-medium rounded-lg hover:bg-gray-800"
+              >
+                Browse matches
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+              </button>
+            </>
+          ) : profileRole === 'tenant' && tenantOverallScore != null ? (
+            <>
+              <h2 className="text-xl font-semibold text-gray-900 mb-2">No matches right now</h2>
+              <p className="text-gray-600 text-center max-w-md mb-8">
+                No properties match your profile yet. Try adjusting filters or check back later for new listings.
+              </p>
             </>
           ) : (
             <>
@@ -993,7 +2086,7 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
             </>
           )}
         </div>
-      )}
+      ) : null}
 
       {submissionModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4">

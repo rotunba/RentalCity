@@ -23,45 +23,61 @@ export function TenantQuestionnairePage() {
   const [monthlyIncome, setMonthlyIncome] = useState('')
   const [completeError, setCompleteError] = useState<string | null>(null)
 
+  const [bio, setBio] = useState('')
+
   useEffect(() => {
     if (!user) return
-    supabase
-      .from('tenant_questionnaire')
-      .select('answers')
-      .eq('user_id', user.id)
-      .maybeSingle()
-      .then(({ data }) => {
-        if (data?.answers && typeof data.answers === 'object') {
-          setAnswers((prev) => ({ ...prev, ...(data.answers as Record<string, string>) }))
-        }
-      })
+    Promise.all([
+      supabase.from('profiles').select('bio').eq('id', user.id).maybeSingle(),
+      supabase.from('tenant_questionnaire').select('answers').eq('user_id', user.id).maybeSingle(),
+    ]).then(([{ data: profileData }, { data: questionnaireData }]) => {
+      if (profileData?.bio?.trim()) setBio(profileData.bio.trim())
+      if (questionnaireData?.answers && typeof questionnaireData.answers === 'object') {
+        const raw = questionnaireData.answers as Record<string, unknown>
+        setAnswers((prev) => ({ ...prev, ...raw } as Record<TenantQuestionId, TenantChoiceId | null | undefined>))
+        const savedIncome = raw.monthly_income
+        if (savedIncome != null && typeof savedIncome === 'number') setMonthlyIncome(String(savedIncome))
+        else if (typeof savedIncome === 'string' && savedIncome.trim()) setMonthlyIncome(savedIncome.trim())
+      }
+    })
   }, [user])
 
-  const totalSteps = tenantQuestions.length + 1
+  const totalSteps = tenantQuestions.length + 2 // bio + questions + income
+  const isBioStep = step === 1
   const isIncomeStep = step === totalSteps
-  const currentQuestion = !isIncomeStep ? tenantQuestions[step - 1] : null
+  const currentQuestion = !isBioStep && !isIncomeStep ? tenantQuestions[step - 2] : null
   const selectedAnswer = currentQuestion ? answers[currentQuestion.id] : undefined
   const progressPercent = totalSteps > 0 ? Math.round((step / totalSteps) * 10) * 10 : 0
   const incomeNum = monthlyIncome.trim() ? parseFloat(monthlyIncome.replace(/[^0-9.]/g, '')) : 0
   const rentChoice = answers['rental_budget']
   const rent = rentChoice && rentChoice in RENTAL_BUDGET_TO_RENT ? RENTAL_BUDGET_TO_RENT[rentChoice] : 0
-  const canProceed = isIncomeStep ? incomeNum > 0 : !!selectedAnswer
+  const canProceed = isBioStep ? true : isIncomeStep ? incomeNum > 0 : !!selectedAnswer
 
   function handleSelect(choiceId: TenantChoiceId) {
     if (!currentQuestion) return
     setAnswers((prev) => ({ ...prev, [currentQuestion.id]: choiceId }))
   }
 
+  async function handleBioNext() {
+    if (!user) return
+    await supabase
+      .from('profiles')
+      .update({ bio: bio.trim() || null })
+      .eq('id', user.id)
+    setStep((s) => s + 1)
+  }
+
   async function handleComplete() {
     setCompleteError(null)
     if (!user || incomeNum <= 0) return
     const dims = scoreTenantDimensions(answers, rent, incomeNum)
+    const answersWithIncome = { ...answers, monthly_income: incomeNum } as Record<string, unknown>
     const { error } = await supabase
       .from('tenant_questionnaire')
       .upsert(
         {
           user_id: user.id,
-          answers,
+          answers: answersWithIncome,
           stability_score: dims.stability,
           payment_risk_score: dims.paymentRisk,
           affordability_score: dims.affordability,
@@ -75,6 +91,13 @@ export function TenantQuestionnairePage() {
       setCompleteError('Could not save. Please try again.')
       return
     }
+
+    // Mark survey as completed so matches unlock and UI can gate correctly.
+    await supabase
+      .from('profiles')
+      .update({ tenant_survey_completed_at: new Date().toISOString() })
+      .eq('id', user.id)
+
     navigate('/matches')
   }
 
@@ -92,7 +115,7 @@ export function TenantQuestionnairePage() {
         <div className="text-center">
           <h1 className="text-[2rem] font-medium text-gray-900">Tenant Questionnaire</h1>
           <p className="mt-3 text-sm leading-7 text-gray-600">
-            Help us match you with compatible landlords. Your answers are used to calculate your compatibility score.
+            Help us match you with compatible landlords.
           </p>
         </div>
 
@@ -111,7 +134,21 @@ export function TenantQuestionnairePage() {
           </div>
         </div>
 
-        {isIncomeStep ? (
+        {isBioStep ? (
+          <div className="mt-7">
+            <h2 className="text-[1.35rem] font-medium text-gray-900">About Me</h2>
+            <p className="mt-2 text-sm text-gray-600">
+              Introduce yourself to landlords. Share your lifestyle, work, and what kind of tenant you are. This helps you stand out in applications.
+            </p>
+            <textarea
+              rows={5}
+              placeholder="e.g. I'm a remote software engineer who works from home. I enjoy quiet evenings and keep a tidy space. I've been renting for 5+ years and always pay on time."
+              value={bio}
+              onChange={(e) => setBio(e.target.value)}
+              className="mt-4 w-full resize-y rounded-lg border border-gray-300 px-4 py-3 text-base focus:border-gray-900 focus:ring-1 focus:ring-gray-900"
+            />
+          </div>
+        ) : isIncomeStep ? (
           <div className="mt-7">
             <h2 className="text-[1.35rem] font-medium text-gray-900">What is your gross monthly income?</h2>
             <p className="mt-2 text-sm text-gray-600">
@@ -178,7 +215,7 @@ export function TenantQuestionnairePage() {
           {step < totalSteps ? (
             <button
               type="button"
-              onClick={() => canProceed && setStep((s) => s + 1)}
+              onClick={() => (isBioStep ? handleBioNext() : canProceed && setStep((s) => s + 1))}
               disabled={!canProceed}
               className="inline-flex items-center gap-2 rounded-lg bg-gray-900 px-5 py-3 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50"
             >

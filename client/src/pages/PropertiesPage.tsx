@@ -17,6 +17,10 @@ type PropertyCard = {
   photoLabel: string
 }
 
+const PAGE_SIZE = 6
+
+type ListingStatusFilter = 'all' | 'draft' | 'active' | 'leased' | 'inactive'
+
 function PropertyStatusBadge({ status }: { status: PropertyStatus }) {
   return (
     <span className="rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-600">
@@ -28,9 +32,23 @@ function PropertyStatusBadge({ status }: { status: PropertyStatus }) {
 export function PropertiesPage() {
   const { user } = useAuth()
   const [properties, setProperties] = useState<PropertyCard[]>([])
+  const [page, setPage] = useState(1)
+  const [totalCount, setTotalCount] = useState(0)
+  const [statusFilter, setStatusFilter] = useState<ListingStatusFilter>('all')
+  const [searchInput, setSearchInput] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useState('')
   const [deleteModalProperty, setDeleteModalProperty] = useState<PropertyCard | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    const t = window.setTimeout(() => setDebouncedSearch(searchInput.trim()), 400)
+    return () => window.clearTimeout(t)
+  }, [searchInput])
+
+  useEffect(() => {
+    setPage(1)
+  }, [statusFilter, debouncedSearch])
 
   useEffect(() => {
     async function loadProperties() {
@@ -41,14 +59,30 @@ export function PropertiesPage() {
 
       setLoading(true)
       setError(null)
+      const from = (page - 1) * PAGE_SIZE
+      const to = from + PAGE_SIZE - 1
 
-      const { data, error } = await supabase
+      let query = supabase
         .from('properties')
         .select(
           'id, title, address_line1, city, state, postal_code, bedrooms, bathrooms, sqft, monthly_rent_cents, status, photo_labels, photo_urls',
+          { count: 'exact' },
         )
         .eq('landlord_id', user.id)
-        .order('created_at', { ascending: false })
+
+      if (statusFilter !== 'all') {
+        query = query.eq('status', statusFilter)
+      }
+
+      const q = debouncedSearch.replace(/[,()%]/g, ' ').trim().slice(0, 80)
+      if (q) {
+        const pattern = `%${q}%`
+        query = query.or(
+          `title.ilike.${pattern},address_line1.ilike.${pattern},city.ilike.${pattern},postal_code.ilike.${pattern}`,
+        )
+      }
+
+      const { data, error, count } = await query.order('created_at', { ascending: false }).range(from, to)
 
       setLoading(false)
 
@@ -56,6 +90,7 @@ export function PropertiesPage() {
         setError(error.message)
         return
       }
+      setTotalCount(count ?? 0)
 
       setProperties(
         (data ?? []).map((property) => ({
@@ -87,9 +122,20 @@ export function PropertiesPage() {
     }
 
     loadProperties()
-  }, [user])
+  }, [page, user, statusFilter, debouncedSearch])
 
-  const empty = useMemo(() => !loading && !error && properties.length === 0, [error, loading, properties.length])
+  const hasActiveFilters = statusFilter !== 'all' || debouncedSearch.length > 0
+  const empty = useMemo(
+    () => !loading && !error && properties.length === 0,
+    [error, loading, properties.length],
+  )
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE))
+  const canGoPrev = page > 1
+  const canGoNext = page < totalPages
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages)
+  }, [page, totalPages])
 
   async function handleDeleteProperty() {
     if (!deleteModalProperty) return
@@ -102,6 +148,7 @@ export function PropertiesPage() {
     }
 
     setProperties((current) => current.filter((property) => property.id !== propertyId))
+    setTotalCount((current) => Math.max(0, current - 1))
     setDeleteModalProperty(null)
   }
 
@@ -129,9 +176,42 @@ export function PropertiesPage() {
 
         {error ? <p className="mt-6 text-sm text-red-600">{error}</p> : null}
 
+        <div className="mt-6 flex flex-col gap-4 rounded-xl border border-gray-200 bg-white p-4 sm:flex-row sm:flex-wrap sm:items-end sm:justify-between">
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="property-status-filter" className="text-xs font-medium text-gray-500">
+              Status
+            </label>
+            <select
+              id="property-status-filter"
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value as ListingStatusFilter)}
+              className="min-w-[200px] rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-800 focus:border-gray-300 focus:outline-none"
+            >
+              <option value="all">All statuses</option>
+              <option value="active">Active</option>
+              <option value="draft">Draft</option>
+              <option value="leased">Leased</option>
+              <option value="inactive">Inactive</option>
+            </select>
+          </div>
+          <div className="flex min-w-[min(100%,280px)] flex-1 flex-col gap-1.5 sm:max-w-md">
+            <label htmlFor="property-search" className="text-xs font-medium text-gray-500">
+              Search
+            </label>
+            <input
+              id="property-search"
+              type="search"
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              placeholder="Title, address, city, or ZIP"
+              className="rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-800 placeholder:text-gray-400 focus:border-gray-300 focus:outline-none"
+            />
+          </div>
+        </div>
+
         {loading ? <p className="mt-7 text-sm text-gray-500">Loading properties...</p> : null}
 
-        {empty ? (
+        {empty && !hasActiveFilters ? (
           <section className="mt-7 rounded-2xl border border-dashed border-gray-300 bg-white px-8 py-14 text-center">
             <h2 className="text-[1.5rem] font-medium text-gray-900">No properties yet</h2>
             <p className="mt-3 text-sm text-gray-600">
@@ -146,6 +226,27 @@ export function PropertiesPage() {
           </section>
         ) : null}
 
+        {empty && hasActiveFilters ? (
+          <section className="mt-7 rounded-2xl border border-gray-200 bg-white px-8 py-12 text-center">
+            <h2 className="text-[1.35rem] font-medium text-gray-900">No properties match your filters</h2>
+            <p className="mt-2 text-sm text-gray-600">
+              Try a different status or clear your search.
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                setStatusFilter('all')
+                setSearchInput('')
+                setDebouncedSearch('')
+              }}
+              className="mt-5 inline-flex items-center justify-center rounded-lg border border-gray-200 bg-white px-4 py-2.5 text-sm font-medium text-gray-800 hover:bg-gray-50"
+            >
+              Clear filters
+            </button>
+          </section>
+        ) : null}
+
+        {!empty ? (
         <div className="mt-7 grid gap-5 md:grid-cols-2 xl:grid-cols-3">
           {properties.map((property) => (
             <article key={property.id} className="overflow-hidden rounded-xl border border-gray-200 bg-white">
@@ -195,6 +296,35 @@ export function PropertiesPage() {
             </article>
           ))}
         </div>
+        ) : null}
+        {!loading && !error && totalCount > PAGE_SIZE ? (
+          <div className="mt-6 flex items-center justify-between gap-4">
+            <p className="text-sm text-gray-500">
+              Showing {(page - 1) * PAGE_SIZE + 1}-{Math.min(page * PAGE_SIZE, totalCount)} of {totalCount}
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={!canGoPrev}
+                className="inline-flex items-center rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 disabled:cursor-not-allowed disabled:opacity-50 hover:bg-gray-50"
+              >
+                Previous
+              </button>
+              <span className="text-sm text-gray-600">
+                Page {page} of {totalPages}
+              </span>
+              <button
+                type="button"
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                disabled={!canGoNext}
+                className="inline-flex items-center rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 disabled:cursor-not-allowed disabled:opacity-50 hover:bg-gray-50"
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        ) : null}
 
       </div>
 

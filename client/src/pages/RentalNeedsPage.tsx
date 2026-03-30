@@ -28,7 +28,7 @@ export function RentalNeedsPage() {
       await supabase.from('tenant_preferences').insert(payload)
     }
     setLoading(false)
-    navigate('/onboarding/lease-preferences')
+    navigate('/lease-preferences')
   }
 
   return (

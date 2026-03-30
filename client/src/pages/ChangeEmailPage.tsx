@@ -63,7 +63,7 @@ export function ChangeEmailPage() {
                     <input
                       id="current-email"
                       type="email"
-                      value={user?.email ?? 'landlord@example.com'}
+                      value={user?.email ?? ''}
                       readOnly
                       className="w-full rounded-xl border border-gray-200 bg-white px-4 py-3.5 pr-11 text-sm text-gray-500"
                     />

@@ -4,7 +4,14 @@ config({ path: '.env.local' })
 config()
 import express from 'express'
 import cors from 'cors'
-import { createClient } from '@supabase/supabase-js'
+import { createClient, type SupabaseClient } from '@supabase/supabase-js'
+import {
+  landlordAnswersToPrefs,
+  tenantAnswersToHistory,
+  scoreRentToIncome,
+  computeMatch,
+  type MatchResult,
+} from './match'
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -14,6 +21,268 @@ const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
 
 app.use(cors({ origin: true }))
 app.use(express.json())
+
+function getSupabaseAdmin() {
+  if (!supabaseUrl || !supabaseServiceKey) return null
+  return createClient(supabaseUrl, supabaseServiceKey, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  })
+}
+
+async function authUser(token: string | null) {
+  if (!token) return null
+  const admin = getSupabaseAdmin()
+  if (!admin) return null
+  const { data: { user }, error } = await admin.auth.getUser(token)
+  return error || !user ? null : user
+}
+
+/** 0–100 for UI when overall_score is unset but dimension scores exist */
+function tenantDisplayScoreFromQuestionnaire(t: {
+  overall_score?: number | null
+  affordability_score?: number | null
+  stability_score?: number | null
+  payment_risk_score?: number | null
+  lifestyle_score?: number | null
+}): number | null {
+  if (t.overall_score != null && Number.isFinite(Number(t.overall_score))) {
+    return Math.round(Number(t.overall_score))
+  }
+  const a = Number(t.affordability_score)
+  const s = Number(t.stability_score)
+  const p = Number(t.payment_risk_score)
+  const l = Number(t.lifestyle_score)
+  const vals = [a, s, p, l].map((v) => (Number.isFinite(v) ? v : null))
+  if (vals.some((v) => v != null)) {
+    const nums = vals.map((v) => (v != null ? v : 5))
+    return Math.round(((nums[0] + nums[1] + nums[2] + nums[3]) / 4) * 10)
+  }
+  return null
+}
+
+const UUID_PARAM_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+type LandlordCatalogRowOut = {
+  propertyId: string
+  tenantId: string
+  match: MatchResult & { tenantScore?: number | null }
+  name: string
+  avatarUrl: string | null
+}
+
+/** Same candidate set as POST /api/matches/landlord-catalog (used for auth + listing). */
+async function buildLandlordCatalogRows(
+  admin: SupabaseClient,
+  landlordId: string,
+  uniquePids: string[],
+  limitPerProperty: number,
+): Promise<LandlordCatalogRowOut[]> {
+  const { data: properties } = await admin
+    .from('properties')
+    .select('id, landlord_id, monthly_rent_cents')
+    .in('id', uniquePids)
+    .eq('landlord_id', landlordId)
+  const propList = (properties ?? []) as Array<{ id: string; landlord_id: string; monthly_rent_cents?: number | null }>
+  if (propList.length === 0) return []
+
+  const landlordIds = [...new Set(propList.map((p) => p.landlord_id))]
+  const { data: landlordRows } = await admin
+    .from('landlord_questionnaire')
+    .select('user_id, answers, policy_strictness_score, risk_tolerance_score, conflict_style_score')
+    .in('user_id', landlordIds)
+  type LRow = {
+    user_id: string
+    answers: Record<string, unknown>
+    policy_strictness_score?: number
+    risk_tolerance_score?: number
+    conflict_style_score?: number
+  }
+  const landlordByUserId = new Map<string, LRow>()
+  ;(landlordRows ?? []).forEach((r: LRow) => landlordByUserId.set(r.user_id, r))
+
+  const { data: tenantRows } = await admin
+    .from('tenant_questionnaire')
+    .select(
+      'user_id, answers, overall_score, affordability_score, stability_score, payment_risk_score, lifestyle_score',
+    )
+    .order('updated_at', { ascending: false })
+    .limit(450)
+
+  type TQ = {
+    user_id: string
+    answers?: Record<string, unknown>
+    overall_score?: number | null
+    affordability_score?: number | null
+    stability_score?: number | null
+    payment_risk_score?: number | null
+    lifestyle_score?: number | null
+  }
+  const tqList = (tenantRows ?? []) as TQ[]
+  if (tqList.length === 0) return []
+
+  const tids = tqList.map((t) => t.user_id)
+  const { data: profileRows } = await admin
+    .from('profiles')
+    .select('id, display_name, avatar_url')
+    .in('id', tids)
+    .eq('role', 'tenant')
+
+  const tenantProfileById = new Map<string, { display_name: string | null; avatar_url: string | null }>()
+  for (const p of profileRows ?? []) {
+    const row = p as { id: string; display_name?: string | null; avatar_url?: string | null }
+    tenantProfileById.set(row.id, {
+      display_name: row.display_name ?? null,
+      avatar_url: row.avatar_url ?? null,
+    })
+  }
+
+  const nowIso = new Date().toISOString()
+  const { data: invites } = await admin
+    .from('tenant_invite_restrictions')
+    .select('tenant_id, landlord_id')
+    .in('tenant_id', tids)
+    .gt('ends_at', nowIso)
+
+  const inviteLandlordByTenant = new Map<string, string>()
+  for (const inv of invites ?? []) {
+    const row = inv as { tenant_id: string; landlord_id: string }
+    inviteLandlordByTenant.set(row.tenant_id, row.landlord_id)
+  }
+
+  const out: LandlordCatalogRowOut[] = []
+
+  for (const prop of propList) {
+    const landlordRow = landlordByUserId.get(prop.landlord_id)
+    let landlordPrefs: ReturnType<typeof landlordAnswersToPrefs> | null = null
+    if (landlordRow) {
+      landlordPrefs = landlordAnswersToPrefs(landlordRow.answers ?? {})
+      landlordPrefs = {
+        ...landlordPrefs,
+        policyStrictnessScore: landlordRow.policy_strictness_score ?? landlordPrefs.policyStrictnessScore,
+        riskToleranceScore: landlordRow.risk_tolerance_score ?? landlordPrefs.riskToleranceScore,
+        conflictStyleScore: landlordRow.conflict_style_score ?? landlordPrefs.conflictStyleScore,
+      }
+    }
+
+    const candidates: LandlordCatalogRowOut[] = []
+
+    for (const tenantData of tqList) {
+      const tid = tenantData.user_id
+      if (!tenantProfileById.has(tid)) continue
+
+      const inviteLandlordId = inviteLandlordByTenant.get(tid) ?? null
+      if (inviteLandlordId != null && prop.landlord_id !== inviteLandlordId) continue
+
+      const tenantAnswers = tenantData.answers ?? {}
+      const tenantHistory = tenantAnswersToHistory(tenantAnswers)
+      const tenantMonthlyIncome = typeof tenantAnswers.monthly_income === 'number' ? tenantAnswers.monthly_income : null
+      const fallbackAffordability = Number(tenantData.affordability_score) ?? 5
+      const rentDollars = (prop.monthly_rent_cents != null ? Number(prop.monthly_rent_cents) : 0) / 100
+      const affordability =
+        tenantMonthlyIncome != null && tenantMonthlyIncome > 0 && rentDollars > 0
+          ? scoreRentToIncome(rentDollars, tenantMonthlyIncome)
+          : fallbackAffordability
+      const tenantDims = {
+        affordability,
+        stability: Number(tenantData.stability_score) ?? 5,
+        paymentRisk: Number(tenantData.payment_risk_score) ?? 5,
+        lifestyle: Number(tenantData.lifestyle_score) ?? 5,
+      }
+      const tenantScore = tenantDisplayScoreFromQuestionnaire(tenantData)
+
+      let m: MatchResult & { tenantScore?: number | null }
+      if (!landlordPrefs) {
+        m = {
+          eligible: true,
+          reasons: [],
+          overall: 50,
+          dimensions: {
+            affordability: tenantDims.affordability,
+            stability: tenantDims.stability,
+            risk: 5,
+            lifestyle: 5,
+            policy: 5,
+          },
+          tenantScore,
+        }
+      } else {
+        const prefsWithScores = {
+          ...landlordPrefs,
+          policyStrictnessScore: landlordRow?.policy_strictness_score ?? landlordPrefs.policyStrictnessScore,
+          riskToleranceScore: landlordRow?.risk_tolerance_score ?? landlordPrefs.riskToleranceScore,
+          conflictStyleScore: landlordRow?.conflict_style_score ?? landlordPrefs.conflictStyleScore,
+        }
+        m = { ...computeMatch(tenantDims, prefsWithScores, tenantHistory), tenantScore }
+      }
+
+      const prof = tenantProfileById.get(tid)!
+      candidates.push({
+        propertyId: prop.id,
+        tenantId: tid,
+        match: m,
+        name: prof.display_name?.trim() || 'Tenant',
+        avatarUrl: prof.avatar_url ?? null,
+      })
+    }
+
+    candidates.sort((a, b) => (b.match.overall ?? 0) - (a.match.overall ?? 0))
+    out.push(...candidates.slice(0, limitPerProperty))
+  }
+
+  return out
+}
+
+/** Mirrors landlord_tenant_universal_application RPC eligibility (SECURITY DEFINER checks). */
+async function landlordMayReadTenantUniversalViaDb(
+  admin: SupabaseClient,
+  landlordId: string,
+  tenantId: string,
+): Promise<boolean> {
+  const nowIso = new Date().toISOString()
+  const [threads, ratings, invites, apps] = await Promise.all([
+    admin.from('message_threads').select('id').eq('tenant_id', tenantId).eq('landlord_id', landlordId).limit(1),
+    admin
+      .from('tenant_ratings')
+      .select('id')
+      .eq('landlord_id', landlordId)
+      .or(`tenant_external_id.eq.${tenantId},tenant_id.eq.${tenantId}`)
+      .limit(1),
+    admin
+      .from('tenant_invite_restrictions')
+      .select('tenant_id')
+      .eq('tenant_id', tenantId)
+      .eq('landlord_id', landlordId)
+      .gt('ends_at', nowIso)
+      .limit(1),
+    admin
+      .from('applications')
+      .select('id, property:property_id(landlord_id)')
+      .eq('tenant_id', tenantId)
+      .limit(50),
+  ])
+  if ((threads.data?.length ?? 0) > 0 || (ratings.data?.length ?? 0) > 0 || (invites.data?.length ?? 0) > 0) {
+    return true
+  }
+  for (const row of apps.data ?? []) {
+    const prop = row.property as { landlord_id?: string } | { landlord_id?: string }[] | null
+    const p = Array.isArray(prop) ? prop[0] : prop
+    if (p?.landlord_id === landlordId) return true
+  }
+  return false
+}
+
+async function landlordMayReadTenantUniversalViaCatalog(
+  admin: SupabaseClient,
+  landlordId: string,
+  tenantId: string,
+): Promise<boolean> {
+  const { data: props } = await admin.from('properties').select('id').eq('landlord_id', landlordId)
+  const pids = (props ?? []).map((p: { id: string }) => p.id)
+  if (pids.length === 0) return false
+  const rows = await buildLandlordCatalogRows(admin, landlordId, pids, 100)
+  return rows.some((r) => r.tenantId === tenantId)
+}
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true })
@@ -31,10 +300,7 @@ app.post('/api/account/delete', async (req, res) => {
     return res.status(401).json({ error: 'Authentication required' })
   }
 
-  const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  })
-
+  const supabaseAdmin = getSupabaseAdmin()!
   const { data: { user }, error: getUserError } = await supabaseAdmin.auth.getUser(token)
 
   if (getUserError || !user) {
@@ -48,6 +314,226 @@ app.post('/api/account/delete', async (req, res) => {
   }
 
   res.json({ success: true })
+})
+
+// Match scores for a tenant viewing properties
+app.post('/api/matches/for-tenant', async (req, res) => {
+  const admin = getSupabaseAdmin()
+  if (!admin) return res.status(500).json({ error: 'Server configuration error' })
+  const token = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null
+  const user = await authUser(token)
+  if (!user) return res.status(401).json({ error: 'Authentication required' })
+  const { tenantId, propertyIds, limit: limitRaw } = req.body as {
+    tenantId?: string
+    propertyIds?: string[]
+    limit?: unknown
+  }
+  if (!tenantId || !Array.isArray(propertyIds) || tenantId !== user.id) {
+    return res.status(400).json({ error: 'Invalid request: tenantId must match authenticated user' })
+  }
+  if (propertyIds.length === 0) return res.json({ matches: {} })
+  const uniqueIds = [...new Set(propertyIds)]
+  const topLimit =
+    typeof limitRaw === 'number' && Number.isFinite(limitRaw) && limitRaw > 0
+      ? Math.min(250, Math.floor(limitRaw))
+      : undefined
+
+  const [tenantRow, propertiesRows, inviteRow] = await Promise.all([
+    admin.from('tenant_questionnaire').select('answers, affordability_score, stability_score, payment_risk_score, lifestyle_score').eq('user_id', tenantId).maybeSingle(),
+    admin.from('properties').select('id, landlord_id, monthly_rent_cents').in('id', uniqueIds),
+    admin.from('tenant_invite_restrictions').select('landlord_id').eq('tenant_id', tenantId).gt('ends_at', new Date().toISOString()).maybeSingle(),
+  ])
+  const tenantData = tenantRow.data
+  const properties = (propertiesRows.data ?? []) as { id: string; landlord_id: string; monthly_rent_cents?: number | null }[]
+  const inviteLandlordId = (inviteRow.data as { landlord_id?: string } | null)?.landlord_id ?? null
+  if (!tenantData) {
+    const empty: Record<string, MatchResult & { tenantScore?: number }> = {}
+    uniqueIds.forEach((id) => { empty[id] = { eligible: false, reasons: ['Tenant questionnaire not completed.'], overall: 0, dimensions: { affordability: 0, stability: 0, risk: 0, lifestyle: 0, policy: 0 } } })
+    return res.json({ matches: empty })
+  }
+
+  const tenantAnswers = (tenantData as { answers?: Record<string, unknown> }).answers ?? {}
+  const tenantHistory = tenantAnswersToHistory(tenantAnswers)
+  const tenantMonthlyIncome = typeof tenantAnswers.monthly_income === 'number' ? tenantAnswers.monthly_income : null
+  const fallbackAffordability = Number(tenantData.affordability_score) ?? 5
+  const baseTenantDims = {
+    affordability: fallbackAffordability,
+    stability: Number(tenantData.stability_score) ?? 5,
+    paymentRisk: Number(tenantData.payment_risk_score) ?? 5,
+    lifestyle: Number(tenantData.lifestyle_score) ?? 5,
+  }
+  const landlordIds = [...new Set(properties.map((p) => p.landlord_id))]
+  const { data: landlordRows } = await admin.from('landlord_questionnaire').select('user_id, answers, policy_strictness_score, risk_tolerance_score, conflict_style_score').in('user_id', landlordIds)
+  type LandlordRow = { user_id: string; answers: Record<string, unknown>; policy_strictness_score?: number; risk_tolerance_score?: number; conflict_style_score?: number }
+  const landlordByUserId = new Map<string, LandlordRow>()
+  ;(landlordRows ?? []).forEach((r: LandlordRow) => {
+    landlordByUserId.set(r.user_id, r)
+  })
+
+  const dimZero = { affordability: 0, stability: 0, risk: 0, lifestyle: 0, policy: 0 }
+  const matches: Record<string, MatchResult> = {}
+  for (const prop of properties) {
+    if (inviteLandlordId != null && prop.landlord_id !== inviteLandlordId) {
+      matches[prop.id] = {
+        eligible: false,
+        reasons: ['Only listings from your invited host are available until your invite period ends.'],
+        overall: 0,
+        dimensions: dimZero,
+      }
+      continue
+    }
+    const rentDollars = (prop.monthly_rent_cents != null ? Number(prop.monthly_rent_cents) : 0) / 100
+    const affordability = tenantMonthlyIncome != null && tenantMonthlyIncome > 0 && rentDollars > 0
+      ? scoreRentToIncome(rentDollars, tenantMonthlyIncome)
+      : fallbackAffordability
+    const tenantDims = { ...baseTenantDims, affordability }
+    const landlord = landlordByUserId.get(prop.landlord_id)
+    if (!landlord) {
+      matches[prop.id] = { eligible: true, reasons: [], overall: 50, dimensions: { affordability: tenantDims.affordability, stability: tenantDims.stability, risk: 5, lifestyle: 5, policy: 5 } }
+      continue
+    }
+    const prefs = landlordAnswersToPrefs(landlord.answers ?? {})
+    const prefsWithScores = {
+      ...prefs,
+      policyStrictnessScore: landlord.policy_strictness_score ?? prefs.policyStrictnessScore,
+      riskToleranceScore: landlord.risk_tolerance_score ?? prefs.riskToleranceScore,
+      conflictStyleScore: landlord.conflict_style_score ?? prefs.conflictStyleScore,
+    }
+    matches[prop.id] = computeMatch(tenantDims, prefsWithScores, tenantHistory)
+  }
+  for (const id of uniqueIds) {
+    if (!matches[id]) matches[id] = { eligible: false, reasons: ['Property not found.'], overall: 0, dimensions: { affordability: 0, stability: 0, risk: 0, lifestyle: 0, policy: 0 } }
+  }
+
+  if (topLimit != null) {
+    const ranked = uniqueIds
+      .map((id) => ({ id, m: matches[id] }))
+      .filter((x) => x.m?.eligible === true)
+      .sort((a, b) => (b.m.overall ?? 0) - (a.m.overall ?? 0))
+      .slice(0, topLimit)
+    const trimmed: Record<string, MatchResult> = {}
+    for (const { id, m } of ranked) {
+      trimmed[id] = m
+    }
+    return res.json({ matches: trimmed })
+  }
+
+  return res.json({ matches })
+})
+
+// Match scores for a landlord viewing applicants
+app.post('/api/matches/for-landlord', async (req, res) => {
+  const admin = getSupabaseAdmin()
+  if (!admin) return res.status(500).json({ error: 'Server configuration error' })
+  const token = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null
+  const user = await authUser(token)
+  if (!user) return res.status(401).json({ error: 'Authentication required' })
+  const { landlordId, tenantIds } = req.body as { landlordId?: string; tenantIds?: string[] }
+  if (!landlordId || !Array.isArray(tenantIds) || landlordId !== user.id) {
+    return res.status(400).json({ error: 'Invalid request: landlordId must match authenticated user' })
+  }
+  if (tenantIds.length === 0) return res.json({ matches: {} })
+  const uniqueTenantIds = [...new Set(tenantIds)]
+
+  const [landlordRow, tenantRows] = await Promise.all([
+    admin.from('landlord_questionnaire').select('answers, policy_strictness_score, risk_tolerance_score, conflict_style_score').eq('user_id', landlordId).maybeSingle(),
+    admin.from('tenant_questionnaire').select('user_id, answers, overall_score, affordability_score, stability_score, payment_risk_score, lifestyle_score').in('user_id', uniqueTenantIds),
+  ])
+  const landlordData = landlordRow.data as { answers?: Record<string, unknown>; policy_strictness_score?: number; risk_tolerance_score?: number; conflict_style_score?: number } | null
+  const tenants = (tenantRows.data ?? []) as Array<{ user_id: string; answers?: Record<string, unknown>; overall_score?: number; affordability_score?: number; stability_score?: number; payment_risk_score?: number; lifestyle_score?: number }>
+
+  let landlordPrefs: ReturnType<typeof landlordAnswersToPrefs> | null = null
+  if (landlordData) {
+    landlordPrefs = landlordAnswersToPrefs(landlordData.answers ?? {})
+    landlordPrefs = { ...landlordPrefs, policyStrictnessScore: landlordData.policy_strictness_score ?? landlordPrefs.policyStrictnessScore, riskToleranceScore: landlordData.risk_tolerance_score ?? landlordPrefs.riskToleranceScore }
+  }
+
+  const matches: Record<string, MatchResult & { tenantScore?: number | null }> = {}
+  for (const t of tenants) {
+    const tenantScore = tenantDisplayScoreFromQuestionnaire(t)
+    if (!landlordPrefs) {
+      matches[t.user_id] = { eligible: true, reasons: [], overall: 50, dimensions: { affordability: 5, stability: 5, risk: 5, lifestyle: 5, policy: 5 }, tenantScore }
+      continue
+    }
+    const tenantDims = {
+      affordability: Number(t.affordability_score) ?? 5,
+      stability: Number(t.stability_score) ?? 5,
+      paymentRisk: Number(t.payment_risk_score) ?? 5,
+      lifestyle: Number(t.lifestyle_score) ?? 5,
+    }
+    const tenantHistory = tenantAnswersToHistory(t.answers ?? {})
+    matches[t.user_id] = { ...computeMatch(tenantDims, landlordPrefs, tenantHistory), tenantScore }
+  }
+  for (const id of uniqueTenantIds) {
+    if (!matches[id]) matches[id] = { eligible: false, reasons: ['Tenant questionnaire not found.'], overall: 0, dimensions: { affordability: 0, stability: 0, risk: 0, lifestyle: 0, policy: 0 }, tenantScore: null }
+  }
+  return res.json({ matches })
+})
+
+/** Top tenant–property match candidates for landlord listings (not limited to applicants). */
+app.post('/api/matches/landlord-catalog', async (req, res) => {
+  const admin = getSupabaseAdmin()
+  if (!admin) return res.status(500).json({ error: 'Server configuration error' })
+  const token = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null
+  const user = await authUser(token)
+  if (!user) return res.status(401).json({ error: 'Authentication required' })
+
+  const { landlordId, propertyIds, limitPerProperty: limitRaw } = req.body as {
+    landlordId?: string
+    propertyIds?: string[]
+    limitPerProperty?: unknown
+  }
+  if (!landlordId || !Array.isArray(propertyIds) || landlordId !== user.id) {
+    return res.status(400).json({ error: 'Invalid request: landlordId must match authenticated user' })
+  }
+  const uniquePids = [...new Set(propertyIds)].filter(Boolean) as string[]
+  if (uniquePids.length === 0) return res.json({ rows: [] })
+
+  const limitPerProperty = Math.min(
+    100,
+    Math.max(
+      1,
+      typeof limitRaw === 'number' && Number.isFinite(limitRaw) ? Math.floor(limitRaw) : 50,
+    ),
+  )
+
+  const out = await buildLandlordCatalogRows(admin, landlordId, uniquePids, limitPerProperty)
+  return res.json({ rows: out })
+})
+
+/** Service-role read for landlords who see a tenant as a match prospect (no application/thread yet). */
+app.get('/api/landlord/tenant-universal-application/:tenantId', async (req, res) => {
+  const admin = getSupabaseAdmin()
+  if (!admin) return res.status(500).json({ error: 'Server configuration error' })
+  const token = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null
+  const user = await authUser(token)
+  if (!user) return res.status(401).json({ error: 'Authentication required' })
+
+  const tenantId = req.params.tenantId
+  if (!tenantId || !UUID_PARAM_RE.test(tenantId)) {
+    return res.status(400).json({ error: 'Invalid tenant id' })
+  }
+
+  const landlordId = user.id
+  const allowed =
+    (await landlordMayReadTenantUniversalViaDb(admin, landlordId, tenantId)) ||
+    (await landlordMayReadTenantUniversalViaCatalog(admin, landlordId, tenantId))
+  if (!allowed) {
+    return res.status(403).json({ error: 'Forbidden' })
+  }
+
+  const { data: row, error } = await admin
+    .from('universal_applications')
+    .select('status, valid_until, created_at')
+    .eq('tenant_id', tenantId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (error) {
+    return res.status(500).json({ error: 'Failed to load universal application' })
+  }
+  return res.json({ universalApplication: row ?? null })
 })
 
 app.listen(PORT, () => {

@@ -53,13 +53,13 @@ function getPrimaryCta(
     case 'application_update':
     case 'application_approved':
     case 'approval':
-      return { label: 'View Application', to: '/applications', primary: false }
+      return { label: 'View Application', to: '/matches?tab=applied', primary: false }
     case 'message':
       return { label: 'Reply', to: '/messages', primary: false }
     case 'review':
       return { label: 'View Details', to: '/matches', primary: false }
     case 'flagged':
-      return { label: 'View', to: '/applications', primary: false }
+      return { label: 'View', to: '/matches?tab=applied', primary: false }
     default:
       return { label: 'View Details', to: '/matches', primary: false }
   }

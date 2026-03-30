@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { formatBedrooms, formatBathrooms, formatCurrency } from '../lib/propertyDraft'
+import { VerificationStatusChecklist } from '../components/VerificationStatusChecklist'
 import { useAuth } from '../lib/useAuth'
 import { supabase } from '../lib/supabase'
 
@@ -12,6 +13,7 @@ type ApplicationDetail = {
   price: string
   acceptedDate: string
   status: string
+  statusRaw: string
   features: string[]
   contactPhone: string
   contactLocation: string
@@ -70,6 +72,7 @@ export function ApplicationDetailsPage() {
   const [application, setApplication] = useState<ApplicationDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [withdrawing, setWithdrawing] = useState(false)
   const [reviewModalOpen, setReviewModalOpen] = useState(false)
   const [reviewComment, setReviewComment] = useState('')
   const reviewRating = 4
@@ -159,6 +162,7 @@ export function ApplicationDetailsPage() {
         price,
         acceptedDate: formatAppliedDate(row.created_at),
         status: formatStatus(row.status),
+        statusRaw: (row.status ?? 'pending').toLowerCase(),
         features,
         contactPhone: row.landlord?.phone ?? '—',
         contactLocation: neighborhood,
@@ -171,15 +175,26 @@ export function ApplicationDetailsPage() {
     loadApplication()
   }, [id, user])
 
+  const handleWithdraw = async () => {
+    if (!user || !application) return
+    setWithdrawing(true)
+    setError(null)
+    const { error: err } = await supabase
+      .from('applications')
+      .update({ status: 'withdrawn' })
+      .eq('id', application.id)
+      .eq('tenant_id', user.id)
+    setWithdrawing(false)
+    if (err) {
+      setError(err.message)
+      return
+    }
+    navigate('/matches?tab=applied')
+  }
+
   if (loading) {
     return (
       <div className="space-y-6">
-        <Link to="/applications" className="hover:text-gray-900 text-sm text-gray-600 flex items-center gap-2">
-          <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-          </svg>
-          Back to Applications
-        </Link>
         <p className="py-8 text-sm text-gray-500">Loading application...</p>
       </div>
     )
@@ -188,12 +203,6 @@ export function ApplicationDetailsPage() {
   if (error || !application) {
     return (
       <div className="space-y-6">
-        <Link to="/applications" className="hover:text-gray-900 text-sm text-gray-600 flex items-center gap-2">
-          <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-          </svg>
-          Back to Applications
-        </Link>
         <p className="py-8 text-sm text-red-600">{error ?? 'Application not found'}</p>
       </div>
     )
@@ -202,15 +211,6 @@ export function ApplicationDetailsPage() {
   return (
     <>
       <div className="space-y-6">
-        <div className="flex items-center gap-2 text-sm text-gray-600">
-          <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-          </svg>
-          <Link to="/applications" className="hover:text-gray-900">
-            Back to Applications
-          </Link>
-        </div>
-
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_200px]">
           <div className="space-y-4">
             <DetailCard>
@@ -238,7 +238,7 @@ export function ApplicationDetailsPage() {
 
               <div className="mt-6">
                 <h2 className="mb-3 text-[1.6rem] font-medium text-gray-900">Application Status</h2>
-                <div className="flex items-center justify-between rounded-lg bg-gray-50 px-4 py-3">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between rounded-lg bg-gray-50 px-4 py-3">
                   <div className="flex items-start gap-3">
                     <svg className="mt-0.5 h-4 w-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
@@ -254,9 +254,21 @@ export function ApplicationDetailsPage() {
                       </p>
                     </div>
                   </div>
-                  <span className="rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-700">
-                    {application.status}
-                  </span>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <span className="rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-700">
+                      {application.status}
+                    </span>
+                    {application.statusRaw === 'pending' && (
+                      <button
+                        type="button"
+                        onClick={handleWithdraw}
+                        disabled={withdrawing}
+                        className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                      >
+                        {withdrawing ? 'Withdrawing…' : 'Withdraw application'}
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
 
@@ -340,18 +352,12 @@ export function ApplicationDetailsPage() {
             </DetailCard>
 
             <DetailCard title="Verification Status">
-              <div className="space-y-3">
-                {['Identity Verified', 'Property Owner'].map((item) => (
-                  <div key={item} className="flex items-center gap-2.5 text-sm text-gray-700">
-                    <span className="flex h-4 w-4 items-center justify-center rounded-full bg-gray-500 text-white">
-                      <svg className="h-2.5 w-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
-                      </svg>
-                    </span>
-                    {item}
-                  </div>
-                ))}
-              </div>
+              <VerificationStatusChecklist
+                items={[
+                  { label: 'Identity Verified', complete: true },
+                  { label: 'Property Owner', complete: true },
+                ]}
+              />
             </DetailCard>
           </div>
         </div>

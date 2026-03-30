@@ -12,13 +12,29 @@ import { supabase } from '../lib/supabase'
 
 const PROPERTY_IMAGES_BUCKET = 'property-images'
 
+const AMENITY_LABELS: Record<string, string> = {
+  pet_friendly: 'Pet Friendly',
+  parking: 'Parking',
+  laundry: 'Laundry',
+  gym: 'Gym',
+  balcony: 'Balcony',
+  yard: 'Yard',
+}
+
+function formatAmenityLabel(label: string): string {
+  if (AMENITY_LABELS[label]) return AMENITY_LABELS[label]
+  // Fallback: turn snake_case into Title Case
+  const normalized = label.replace(/_/g, ' ')
+  return normalized.replace(/\b\w/g, (ch) => ch.toUpperCase())
+}
+
 function AmenityItem({ label }: { label: string }) {
   return (
     <div className="flex items-center gap-2 text-sm text-gray-800">
       <svg className="h-4 w-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M12 5l7 7-7 7" />
       </svg>
-      <span>{label}</span>
+      <span>{formatAmenityLabel(label)}</span>
     </div>
   )
 }

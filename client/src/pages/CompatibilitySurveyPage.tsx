@@ -96,9 +96,9 @@ export function CompatibilitySurveyPage() {
       }
       return
     }
-    // Tenants no longer use this multi-step survey page; send them to lease preferences instead.
+    // Tenants no longer use this multi-step survey page; send them to lease preferences in shell.
     if (profileRole === 'tenant') {
-      navigate('/onboarding/lease-preferences', { replace: true })
+      navigate('/lease-preferences', { replace: true })
     }
   }, [roleLoading, profileRole, landlordSurveyCompletedAt, navigate])
 
@@ -146,7 +146,7 @@ export function CompatibilitySurveyPage() {
     : !!selectedAnswer
 
   async function handleCompleteTenant() {
-    navigate('/onboarding/lease-preferences')
+    navigate('/lease-preferences')
   }
 
   async function handleComplete() {

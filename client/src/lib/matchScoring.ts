@@ -1,6 +1,9 @@
 import type { TenantDimensionScores } from './tenantScoring'
 import type { LandlordPreferences } from './landlordPreferences'
 
+/** Set to false to revert: strict alignment only, no floor for flexible landlord + safe tenant */
+const BOOST_SAFE_TENANT_FOR_FLEXIBLE_LANDLORD = true
+
 export type TenantHistoryFlags = {
   evictionRecencyMonths: number | null // null means never
   bankruptcyRecencyMonths: number | null // null means never
@@ -63,25 +66,35 @@ export function computeMatchScore(
     reasons.push('Too many late payments for this landlord’s policy.')
   }
 
+  if (!eligible) {
+    return {
+      eligible: false,
+      reasons,
+      dimensions: { affordability: 0, stability: 0, risk: 0, lifestyle: 0, policy: 0 },
+      overall: 0,
+    }
+  }
+
   // Dimension compatibility scores (0–10)
   const affordability = tenant.affordability
   const stability = tenant.stability
 
-  // Risk compatibility takes into account tenant paymentRisk and landlord risk tolerance
-  const risk = Math.max(
-    0,
-    10 - Math.abs(tenant.paymentRisk - landlord.riskToleranceScore),
-  )
+  // Risk: align tenant risk level (10 - paymentRisk) with landlord tolerance (high tol = accepts riskier tenants)
+  const tenantRiskLevel = 10 - tenant.paymentRisk
+  let risk = Math.max(0, 10 - Math.abs(tenantRiskLevel - landlord.riskToleranceScore))
 
   // Lifestyle compatibility compares tenant lifestyle with landlord conflict style
   const lifestyleGap = Math.abs(tenant.lifestyle - landlord.conflictStyleScore)
   const lifestyle = Math.max(0, 10 - lifestyleGap)
 
-  // Policy compatibility rewards alignment between tenant risk & landlord strictness
-  const policy = Math.max(
-    0,
-    10 - Math.abs(tenant.paymentRisk - (10 - landlord.policyStrictnessScore)),
-  )
+  // Policy: tenant safety (paymentRisk) should match landlord strictness (high strict = wants safe tenant)
+  let policy = Math.max(0, 10 - Math.abs(tenant.paymentRisk - landlord.policyStrictnessScore))
+
+  // Optional: floor for flexible landlord + safe tenant (don't over-penalize; set BOOST_* = false to revert)
+  if (BOOST_SAFE_TENANT_FOR_FLEXIBLE_LANDLORD && landlord.riskToleranceScore >= 7 && tenant.paymentRisk >= 8) {
+    risk = Math.max(risk, 5)
+    policy = Math.max(policy, 5)
+  }
 
   const dimensions: MatchDimensions = {
     affordability,
@@ -102,7 +115,7 @@ export function computeMatchScore(
   const overall = Math.round(overall0to1 * 100)
 
   return {
-    eligible,
+    eligible: true,
     reasons,
     dimensions,
     overall,

@@ -90,6 +90,10 @@ export function AccountSettingsPage() {
   const [deleteAccountOpen, setDeleteAccountOpen] = useState(false)
   const [deletingAccount, setDeletingAccount] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [suspendModalOpen, setSuspendModalOpen] = useState(false)
+  const [suspending, setSuspending] = useState(false)
+  const [suspendError, setSuspendError] = useState<string | null>(null)
+  const [isSuspended, setIsSuspended] = useState(false)
   const [applicationHistory, setApplicationHistory] = useState<ApplicationHistoryItem[]>([])
   const [loadingHistory, setLoadingHistory] = useState(true)
 
@@ -121,6 +125,45 @@ export function AccountSettingsPage() {
     } finally {
       setDeletingAccount(false)
     }
+  }
+
+  useEffect(() => {
+    if (!user) return
+    supabase
+      .from('profiles')
+      .select('is_suspended')
+      .eq('id', user.id)
+      .maybeSingle()
+      .then(({ data }) => {
+        setIsSuspended(data?.is_suspended ?? false)
+      })
+  }, [user])
+
+  async function handleSuspendAccount() {
+    if (!user) return
+    setSuspending(true)
+    setSuspendError(null)
+    const { error } = await supabase.from('profiles').update({ is_suspended: true }).eq('id', user.id)
+    setSuspending(false)
+    if (error) {
+      setSuspendError(error.message)
+      return
+    }
+    setIsSuspended(true)
+    setSuspendModalOpen(false)
+  }
+
+  async function handleReactivateAccount() {
+    if (!user) return
+    setSuspending(true)
+    setSuspendError(null)
+    const { error } = await supabase.from('profiles').update({ is_suspended: false }).eq('id', user.id)
+    setSuspending(false)
+    if (error) {
+      setSuspendError(error.message)
+      return
+    }
+    setIsSuspended(false)
   }
 
   useEffect(() => {
@@ -214,37 +257,30 @@ export function AccountSettingsPage() {
             />
           </LandlordSettingsGroup>
 
-          <LandlordSettingsGroup title="Support">
-            <LandlordSettingsItem
-              to="/account/settings/support"
-              title="Contact Support"
-              description="Get help from our team"
-              icon={
-                <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-                </svg>
-              }
-            />
-            <LandlordSettingsItem
-              to="/account/settings/legal/terms"
-              title="Terms of Services"
-              description="View our terms and conditions to better understand the platform."
-              icon={
-                <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
-              }
-            />
-            <LandlordSettingsItem
-              to="/account/settings/legal/privacy"
-              title="Privacy Policy"
-              description="View our privacy policy to understand how securely handle data."
-              icon={
-                <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-                </svg>
-              }
-            />
+          <LandlordSettingsGroup title="Account Actions">
+            {isSuspended ? (
+              <LandlordSettingsItem
+                title="Reactivate Account"
+                description="Restore your account visibility. Your profile will be shown to tenants again."
+                onClick={handleReactivateAccount}
+                icon={
+                  <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                }
+              />
+            ) : (
+              <LandlordSettingsItem
+                title="Suspend Account"
+                description="Temporarily hide your account from tenants. You can reactivate it at any time."
+                onClick={() => { setSuspendModalOpen(true); setSuspendError(null) }}
+                icon={
+                  <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                }
+              />
+            )}
             <LandlordSettingsItem
               title="Delete Account"
               description="Permanently close your account and remove your personal information from our platform. This action is irreversible."
@@ -258,6 +294,57 @@ export function AccountSettingsPage() {
           </LandlordSettingsGroup>
         </div>
 
+
+        {suspendModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4">
+            <div className="w-full max-w-lg rounded-xl bg-white p-5 shadow-xl">
+              <div className="flex items-start justify-between gap-3 px-1 pt-1">
+                <div className="flex h-7 w-7 items-center justify-center rounded-full bg-amber-50 text-amber-600">
+                  <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                </div>
+                <h2 className="pt-0.5 text-base font-medium text-gray-900">Suspend Account?</h2>
+                <button
+                  type="button"
+                  onClick={() => setSuspendModalOpen(false)}
+                  className="rounded-md p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+                  aria-label="Close"
+                >
+                  <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+              <div className="px-1 pb-1 pt-4">
+                <p className="text-lg font-medium text-gray-900">
+                  Temporarily hide your account from tenants?
+                </p>
+                <p className="mt-3 text-base text-gray-600">
+                  Your listings will no longer appear in matches. Your data is preserved and you can reactivate at any time from Settings.
+                </p>
+                {suspendError && <p className="mt-4 text-sm text-red-600">{suspendError}</p>}
+                <div className="mt-6 space-y-3">
+                  <button
+                    type="button"
+                    onClick={handleSuspendAccount}
+                    disabled={suspending}
+                    className="w-full rounded-lg bg-amber-500 py-3 text-sm font-medium text-white hover:bg-amber-600 disabled:opacity-50"
+                  >
+                    {suspending ? 'Suspending...' : 'Suspend Account'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSuspendModalOpen(false)}
+                    className="w-full rounded-lg border border-gray-300 py-3 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {deleteAccountOpen && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4">
@@ -410,52 +497,9 @@ export function AccountSettingsPage() {
         </button>
       </SectionCard>
 
-      {/* Application History */}
+      {/* Account actions */}
       <SectionCard
-        title="Application History"
-        icon={
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-        }
-      >
-        <div className="space-y-3 mb-4">
-          {loadingHistory ? (
-            <p className="text-sm text-gray-500">Loading...</p>
-          ) : applicationHistory.length === 0 ? (
-            <p className="text-sm text-gray-500">No applications yet.</p>
-          ) : (
-            applicationHistory.map((item) => (
-              <div
-                key={item.id}
-                className="flex items-center justify-between rounded-lg border border-gray-200 px-4 py-3"
-              >
-                <div>
-                  <p className="font-medium text-gray-900">{item.property}</p>
-                  <p className="text-sm text-gray-500">Applied on {item.appliedDate}</p>
-                </div>
-                <span
-                  className={`rounded-full px-3 py-1 text-sm font-medium ${
-                    item.status === 'Approved' ? 'bg-gray-100 text-gray-700' : 'bg-gray-100 text-gray-700'
-                  }`}
-                >
-                  {item.status}
-                </span>
-              </div>
-            ))
-          )}
-        </div>
-        <button
-          type="button"
-          className="w-full py-2.5 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50"
-        >
-          View All History
-        </button>
-      </SectionCard>
-
-      {/* Support */}
-      <SectionCard
-        title="Support"
+        title="Account Actions"
         icon={
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 5.636l-3.536 3.536m0 5.656l3.536 3.536M9.172 9.172L5.636 5.636m3.536 9.192l-3.536 3.536M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-5 0a4 4 0 11-8 0 4 4 0 018 0z" />
@@ -463,33 +507,36 @@ export function AccountSettingsPage() {
         }
       >
         <div className="space-y-3">
-          <Link to="/account/settings/support" className="flex gap-3 rounded-lg border border-gray-200 p-4 hover:bg-gray-50">
-            <svg className="w-5 h-5 text-gray-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-            </svg>
-            <div>
-              <p className="font-medium text-gray-900">Contact Support</p>
-              <p className="text-sm text-gray-500">Get help from our team</p>
-            </div>
-          </Link>
-          <Link to="/account/settings/legal/terms" className="flex gap-3 rounded-lg border border-gray-200 p-4 hover:bg-gray-50">
-            <svg className="w-5 h-5 text-gray-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-            </svg>
-            <div>
-              <p className="font-medium text-gray-900">Terms of Service</p>
-              <p className="text-sm text-gray-500">View our terms and conditions to better understand the platform.</p>
-            </div>
-          </Link>
-          <Link to="/account/settings/legal/privacy" className="flex gap-3 rounded-lg border border-gray-200 p-4 hover:bg-gray-50">
-            <svg className="w-5 h-5 text-gray-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-            </svg>
-            <div>
-              <p className="font-medium text-gray-900">Privacy Policy</p>
-              <p className="text-sm text-gray-500">View our privacy policy to understand how we securely handle data.</p>
-            </div>
-          </Link>
+          {isSuspended ? (
+            <button
+              type="button"
+              onClick={handleReactivateAccount}
+              disabled={suspending}
+              className="w-full flex gap-3 rounded-lg border border-gray-200 p-4 text-left hover:bg-gray-50 disabled:opacity-50"
+            >
+              <svg className="w-5 h-5 text-gray-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              <div>
+                <p className="font-medium text-gray-900">Reactivate Account</p>
+                <p className="text-sm text-gray-500">Restore your account visibility. Your profile will be shown to landlords again.</p>
+              </div>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => { setSuspendModalOpen(true); setSuspendError(null) }}
+              className="w-full flex gap-3 rounded-lg border border-gray-200 p-4 text-left hover:bg-gray-50"
+            >
+              <svg className="w-5 h-5 text-gray-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <div>
+                <p className="font-medium text-gray-900">Suspend Account</p>
+                <p className="text-sm text-gray-500">Temporarily hide your account from landlords. Your profile will stop appearing in matches. You can reactivate at any time.</p>
+              </div>
+            </button>
+          )}
           <button
             type="button"
             onClick={() => { setDeleteAccountOpen(true); setDeleteError(null) }}
@@ -505,6 +552,59 @@ export function AccountSettingsPage() {
           </button>
         </div>
       </SectionCard>
+
+      {suspendModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4">
+          <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-xl">
+            <div className="flex items-start justify-between gap-4 px-5 pt-5">
+              <div className="flex items-center gap-3">
+                <div className="flex h-8 w-8 items-center justify-center rounded-full bg-amber-50 text-amber-600">
+                  <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                </div>
+                <h2 className="text-xl font-semibold text-gray-900">Suspend Account?</h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSuspendModalOpen(false)}
+                className="rounded-md p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+                aria-label="Close"
+              >
+                <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="px-5 pb-5 pt-4">
+              <p className="text-[1.1rem] font-medium leading-tight text-gray-900">
+                Temporarily hide your account from landlords?
+              </p>
+              <p className="mt-4 text-base leading-7 text-gray-600">
+                Your profile will no longer appear in property matches. Your data is preserved and you can reactivate at any time from Settings.
+              </p>
+              {suspendError && <p className="mt-4 text-sm text-red-600">{suspendError}</p>}
+              <div className="mt-6 space-y-3">
+                <button
+                  type="button"
+                  onClick={handleSuspendAccount}
+                  disabled={suspending}
+                  className="w-full rounded-xl bg-amber-500 py-3 text-base font-medium text-white hover:bg-amber-600 disabled:opacity-50"
+                >
+                  {suspending ? 'Suspending...' : 'Suspend Account'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSuspendModalOpen(false)}
+                  className="w-full rounded-xl border border-gray-300 py-3 text-base font-medium text-gray-700 hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {deleteAccountOpen && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4">

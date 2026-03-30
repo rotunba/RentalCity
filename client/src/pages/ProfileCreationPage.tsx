@@ -345,7 +345,7 @@ export function ProfileCreationPage() {
 
   return (
     <div className="mx-auto max-w-md px-4 py-12">
-      <Link to="/onboarding/lease-preferences" className="mb-8 inline-flex items-center gap-2 text-gray-600 hover:text-gray-900">
+      <Link to="/lease-preferences" className="mb-8 inline-flex items-center gap-2 text-gray-600 hover:text-gray-900">
         <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
         </svg>

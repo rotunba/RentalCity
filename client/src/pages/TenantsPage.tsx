@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useLocation, useSearchParams } from 'react-router-dom'
+import { TenantAvatar } from '../components/TenantAvatar'
 import { useAuth } from '../lib/useAuth'
 import { supabase } from '../lib/supabase'
 
 type AcceptedTenant = {
   id: string
   profileId: string
+  propertyId: string
   name: string
+  avatarUrl: string | null
   property: string
   propertyAddress: string
   approvedDate: string
@@ -19,6 +22,7 @@ type AcceptedTenant = {
 type ApprovedApplicationRow = {
   id: string
   tenant_id: string
+  property_id: string
   updated_at: string
   property: {
     title: string | null
@@ -28,6 +32,7 @@ type ApprovedApplicationRow = {
   } | null
   tenant: {
     display_name: string | null
+    avatar_url: string | null
   } | null
 }
 
@@ -39,21 +44,15 @@ function formatDisplayDate(value: string) {
   })
 }
 
-function TenantAvatar({ name }: { name: string }) {
-  return (
-    <div className="flex h-14 w-14 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-900">
-      <svg className="h-8 w-8" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M8 9.5c.4-.9 1.2-1.5 2.1-1.5h3.8c1 0 1.8.6 2.1 1.5M9 15c1 .7 1.9 1 3 1s2-.3 3-1M10 11h.01M14 11h.01" />
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M12 3c3.2 0 5.8 2.6 5.8 5.8v1.5c0 .8.3 1.6.8 2.3l.8 1c.5.6.1 1.4-.6 1.4H5.2c-.7 0-1.1-.8-.6-1.4l.8-1c.5-.7.8-1.5.8-2.3V8.8C6.2 5.6 8.8 3 12 3z" />
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M9.5 6.5c.8-.4 1.6-.5 2.5-.5s1.7.1 2.5.5" />
-      </svg>
-      <span className="sr-only">{name}</span>
-    </div>
-  )
-}
-
 export function TenantsPage() {
   const { user } = useAuth()
+  const location = useLocation()
+  const tenantProfileNavState = useMemo(
+    () => ({ from: `${location.pathname}${location.search}` }),
+    [location.pathname, location.search],
+  )
+  const [searchParams, setSearchParams] = useSearchParams()
+  const tenantIdFromUrl = searchParams.get('tenant')
   const [tenants, setTenants] = useState<AcceptedTenant[]>([])
   const [searchQuery, setSearchQuery] = useState('')
   const [propertyFilter, setPropertyFilter] = useState('All Properties')
@@ -107,7 +106,7 @@ export function TenantsPage() {
           supabase
             .from('applications')
             .select(
-              'id, tenant_id, updated_at, property:property_id(title, address_line1, city, state), tenant:tenant_id(display_name)',
+              'id, tenant_id, property_id, updated_at, property:property_id(title, address_line1, city, state), tenant:tenant_id(display_name, avatar_url)',
             )
             .eq('status', 'approved'),
           supabase
@@ -149,7 +148,9 @@ export function TenantsPage() {
         return {
           id: application.id,
           profileId: application.tenant_id,
+          propertyId: application.property_id,
           name: application.tenant?.display_name || 'Tenant',
+          avatarUrl: application.tenant?.avatar_url ?? null,
           property: propertyTitle,
           propertyAddress,
           approvedDate: formatDisplayDate(application.updated_at),
@@ -165,6 +166,17 @@ export function TenantsPage() {
 
     loadTenants()
   }, [user])
+
+  useEffect(() => {
+    if (!tenantIdFromUrl || loading || pageError || tenants.length === 0) return
+    const found = tenants.find((t) => t.profileId === tenantIdFromUrl)
+    setSearchParams({}, { replace: true })
+    if (!found) return
+    setRatingModalTenant(found)
+    setSelectedRating(found.rating ?? 4)
+    setFeedback(found.comment ?? '')
+    setRatingError(null)
+  }, [tenantIdFromUrl, loading, pageError, tenants, setSearchParams])
 
   async function submitRating() {
     if (!ratingModalTenant || !user) return
@@ -272,10 +284,21 @@ export function TenantsPage() {
           {filteredTenants.map((tenant) => (
             <section key={tenant.id} className="rounded-xl border border-gray-200 bg-white px-4 py-4">
               <div className="flex items-start justify-between gap-4">
-                <div className="flex min-w-0 items-start gap-4">
-                  <TenantAvatar name={tenant.name} />
+                <Link
+                  to={`/matches/tenant/${encodeURIComponent(tenant.profileId)}?${new URLSearchParams({
+                    property: tenant.propertyId,
+                    application: tenant.id,
+                    mode: 'full',
+                    status: 'accepted',
+                  }).toString()}`}
+                  state={tenantProfileNavState}
+                  className="group flex min-w-0 flex-1 items-start gap-4 rounded-lg text-left outline-none focus-visible:ring-2 focus-visible:ring-gray-400 focus-visible:ring-offset-2"
+                >
+                  <TenantAvatar name={tenant.name} avatarUrl={tenant.avatarUrl} />
                   <div className="min-w-0">
-                    <h2 className="text-[1.45rem] font-medium text-gray-900">{tenant.name}</h2>
+                    <h2 className="text-[1.45rem] font-medium text-gray-900 decoration-gray-400 underline-offset-2 group-hover:underline">
+                      {tenant.name}
+                    </h2>
                     <p className="mt-1 text-sm text-gray-500">{tenant.property}</p>
                     <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 text-sm text-gray-500">
                       <span className="inline-flex items-center gap-1.5">
@@ -304,7 +327,7 @@ export function TenantsPage() {
                       </span>
                     </div>
                   </div>
-                </div>
+                </Link>
 
                 {tenant.ratingStatus === 'Rated' ? (
                   <div className="flex items-center gap-2">
@@ -316,7 +339,13 @@ export function TenantsPage() {
                       Edit Rating
                     </button>
                     <Link
-                      to={`/matches/tenant/${tenant.profileId}?mode=full&status=accepted`}
+                      to={`/matches/tenant/${encodeURIComponent(tenant.profileId)}?${new URLSearchParams({
+                        property: tenant.propertyId,
+                        application: tenant.id,
+                        mode: 'full',
+                        status: 'accepted',
+                      }).toString()}`}
+                      state={tenantProfileNavState}
                       className="inline-flex items-center justify-center rounded-lg bg-gray-900 px-4 py-3 text-sm font-medium text-white hover:bg-gray-800"
                     >
                       View Profile
@@ -344,7 +373,8 @@ export function TenantsPage() {
             <div>
               <p className="text-sm font-medium text-gray-800">About Tenant Ratings</p>
               <p className="mt-2 max-w-3xl text-sm leading-6 text-gray-600">
-                You can rate tenants after they&apos;ve been accepted and moved into your property. Reviews and ratings are currently private and not shown publicly.
+                You can rate tenants after they&apos;ve been accepted. Reviews are visible to other landlords on the
+                tenant&apos;s profile; each landlord can edit only their own review.
               </p>
             </div>
           </div>
@@ -447,7 +477,8 @@ export function TenantsPage() {
             </div>
             <h2 className="mt-5 text-[2rem] font-medium text-gray-900">Thank You</h2>
             <p className="mt-4 text-sm leading-7 text-gray-600">
-              Your review has been submitted. Ratings are not visible to tenants but help improve the community.
+              Your review has been saved. Other landlords can see it on this tenant&apos;s profile; you can update it
+              anytime from the tenant profile or reviews page.
             </p>
             <button
               type="button"

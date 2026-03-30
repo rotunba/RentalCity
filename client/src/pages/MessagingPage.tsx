@@ -1,20 +1,34 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useAuth } from '../lib/useAuth'
 import { useProfileRole } from '../lib/useProfileRole'
+import { safeInternalPath } from '../lib/safeInternalPath'
 import { supabase } from '../lib/supabase'
 
 type ProfileRole = 'tenant' | 'landlord'
 
 type Conversation = {
   id: string
+  tenantId: string
+  landlordId: string
   counterpartId: string
   name: string
+  /** Latest listing focus on the thread (optional). */
+  focusPropertyId: string | null
   property: string
   propertyAddress: string
   propertyPrice: string
   preview: string
   timeAgo: string
+}
+
+type MatchListingOption = {
+  applicationId: string
+  propertyId: string
+  label: string
+  address: string
+  rent: string
+  status: string
 }
 
 type Message = {
@@ -31,6 +45,7 @@ type ThreadRow = {
   tenant_id: string
   landlord_id: string
   updated_at: string
+  property_id: string | null
   property: {
     title: string | null
     address_line1: string
@@ -99,9 +114,41 @@ function formatCurrency(cents: number | null | undefined) {
   }).format(cents / 100)
 }
 
+function applicationStatusLabel(status: string) {
+  const s = status.toLowerCase()
+  if (s === 'pending') return 'Pending'
+  if (s === 'approved') return 'Accepted'
+  if (s === 'rejected') return 'Declined'
+  if (s === 'withdrawn') return 'Withdrawn'
+  return status
+}
+
+/** Messages for a thread can be scoped by listing (property_id); null = general / untagged only. */
+function messagesQueryForListing(
+  threadId: string,
+  listingPropertyId: string | null,
+) {
+  let q = supabase
+    .from('messages')
+    .select('id, thread_id, sender_id, body, created_at, sender:sender_id(display_name)')
+    .eq('thread_id', threadId)
+
+  if (listingPropertyId === null) {
+    q = q.is('property_id', null)
+  } else {
+    q = q.eq('property_id', listingPropertyId)
+  }
+
+  return q.order('created_at', { ascending: true })
+}
+
 export function MessagingPage() {
   const { user } = useAuth()
   const { role: profileRole, loading: roleLoading } = useProfileRole(user)
+  const [searchParams] = useSearchParams()
+  const threadParam = searchParams.get('thread')
+  const tenantOrLandlordParam = searchParams.get('tenant')
+  const returnToProfile = safeInternalPath(searchParams.get('returnTo'))
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedConversationId, setSelectedConversationId] = useState('')
   const [conversations, setConversations] = useState<Conversation[]>([])
@@ -116,6 +163,10 @@ export function MessagingPage() {
   const [reportNote, setReportNote] = useState('')
   const [statusMessage, setStatusMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [matchOptions, setMatchOptions] = useState<MatchListingOption[]>([])
+  const [loadingMatchOptions, setLoadingMatchOptions] = useState(false)
+  const [selectedMatchPropertyId, setSelectedMatchPropertyId] = useState<string | null>(null)
+  const [savingMatchContext, setSavingMatchContext] = useState(false)
   const reportReasons = [
     'Fraudulent Activity',
     'Inappropriate Conduct',
@@ -137,7 +188,7 @@ export function MessagingPage() {
       const { data: threadData, error: threadError } = await supabase
         .from('message_threads')
         .select(
-          'id, tenant_id, landlord_id, updated_at, property:property_id(title, address_line1, city, state, monthly_rent_cents), tenant:tenant_id(display_name), landlord:landlord_id(display_name)',
+          'id, tenant_id, landlord_id, updated_at, property_id, property:property_id(title, address_line1, city, state, monthly_rent_cents), tenant:tenant_id(display_name), landlord:landlord_id(display_name)',
         )
         .order('updated_at', { ascending: false })
 
@@ -178,17 +229,21 @@ export function MessagingPage() {
         const counterpartIsLandlord = profileRole === 'tenant'
         const counterpartId = counterpartIsLandlord ? thread.landlord_id : thread.tenant_id
         const latest = latestByThread.get(thread.id)
-        const propertyLabel = thread.property?.title || thread.property?.address_line1 || 'Property'
+        const propertyLabel =
+          thread.property?.title || thread.property?.address_line1 || (thread.property_id ? 'Listing' : '')
         const propertyAddress = [thread.property?.address_line1, thread.property?.city, thread.property?.state]
           .filter(Boolean)
           .join(', ')
 
         return {
           id: thread.id,
+          tenantId: thread.tenant_id,
+          landlordId: thread.landlord_id,
           counterpartId,
           name:
             (counterpartIsLandlord ? thread.landlord?.display_name : thread.tenant?.display_name) ||
             (counterpartIsLandlord ? 'Landlord' : 'Tenant'),
+          focusPropertyId: thread.property_id ?? null,
           property: propertyLabel,
           propertyAddress,
           propertyPrice: formatCurrency(thread.property?.monthly_rent_cents),
@@ -199,6 +254,11 @@ export function MessagingPage() {
 
       setConversations(mapped)
       setSelectedConversationId((current) => {
+        if (threadParam && mapped.some((c) => c.id === threadParam)) return threadParam
+        if (tenantOrLandlordParam) {
+          const byCounterpart = mapped.find((c) => c.counterpartId === tenantOrLandlordParam)
+          if (byCounterpart) return byCounterpart.id
+        }
         if (current && mapped.some((conversation) => conversation.id === current)) return current
         return mapped[0]?.id ?? ''
       })
@@ -206,7 +266,7 @@ export function MessagingPage() {
     }
 
     loadConversations()
-  }, [profileRole, user])
+  }, [profileRole, user, threadParam, tenantOrLandlordParam])
 
   useEffect(() => {
     async function loadMessages() {
@@ -218,11 +278,7 @@ export function MessagingPage() {
 
       setLoadingMessages(true)
 
-      const { data, error } = await supabase
-        .from('messages')
-        .select('id, thread_id, sender_id, body, created_at, sender:sender_id(display_name)')
-        .eq('thread_id', selectedConversationId)
-        .order('created_at', { ascending: true })
+      const { data, error } = await messagesQueryForListing(selectedConversationId, selectedMatchPropertyId)
 
       setLoadingMessages(false)
 
@@ -254,7 +310,7 @@ export function MessagingPage() {
     }
 
     loadMessages()
-  }, [profileRole, selectedConversationId, user])
+  }, [profileRole, selectedConversationId, selectedMatchPropertyId, user])
 
   const filteredConversations = useMemo(() => {
     const normalized = searchQuery.trim().toLowerCase()
@@ -263,7 +319,7 @@ export function MessagingPage() {
     return conversations.filter((conversation) => {
       return (
         conversation.name.toLowerCase().includes(normalized) ||
-        conversation.property.toLowerCase().includes(normalized) ||
+        (conversation.property || '').toLowerCase().includes(normalized) ||
         conversation.preview.toLowerCase().includes(normalized)
       )
     })
@@ -276,6 +332,135 @@ export function MessagingPage() {
     conversations[0] ??
     null
 
+  useEffect(() => {
+    async function loadMatchListings() {
+      if (!user || !selectedConversationId) {
+        setMatchOptions([])
+        setSelectedMatchPropertyId(null)
+        return
+      }
+
+      const conv = conversations.find((c) => c.id === selectedConversationId)
+      if (!conv) {
+        setMatchOptions([])
+        setSelectedMatchPropertyId(null)
+        return
+      }
+
+      const threadIdWhenStarted = selectedConversationId
+
+      // Avoid showing the previous thread’s listing filter while options load.
+      setSelectedMatchPropertyId(conv.focusPropertyId ?? null)
+
+      setLoadingMatchOptions(true)
+      setError(null)
+
+      type AppRow = {
+        id: string
+        status: string
+        property_id: string
+        property: {
+          id: string
+          landlord_id: string
+          title: string | null
+          address_line1: string
+          city: string
+          state: string | null
+          monthly_rent_cents: number | null
+        } | null
+      }
+
+      const { data, error: appError } = await supabase
+        .from('applications')
+        .select(
+          'id, status, property_id, property:property_id(id, landlord_id, title, address_line1, city, state, monthly_rent_cents)',
+        )
+        .eq('tenant_id', conv.tenantId)
+        .neq('status', 'withdrawn')
+
+      if (appError) {
+        setLoadingMatchOptions(false)
+        setError(appError.message)
+        setMatchOptions([])
+        setSelectedMatchPropertyId(null)
+        return
+      }
+
+      if (threadIdWhenStarted !== selectedConversationId) {
+        setLoadingMatchOptions(false)
+        return
+      }
+
+      const rows = ((data ?? []) as unknown as AppRow[]).filter(
+        (r) => r.property?.landlord_id === conv.landlordId,
+      )
+
+      const opts: MatchListingOption[] = rows.map((r) => {
+        const p = r.property!
+        const label = p.title?.trim() || p.address_line1
+        const address = [p.address_line1, p.city, p.state].filter(Boolean).join(', ')
+        return {
+          applicationId: r.id,
+          propertyId: r.property_id,
+          label,
+          address,
+          rent: formatCurrency(p.monthly_rent_cents),
+          status: r.status,
+        }
+      })
+
+      setMatchOptions(opts)
+
+      const focus = conv.focusPropertyId
+      const focusOk = focus != null && opts.some((o) => o.propertyId === focus)
+      setSelectedMatchPropertyId(focusOk ? focus : opts[0]?.propertyId ?? null)
+
+      setLoadingMatchOptions(false)
+    }
+
+    loadMatchListings()
+  }, [user, selectedConversationId, conversations])
+
+  const selectedListing = useMemo(() => {
+    if (selectedMatchPropertyId == null) return null
+    return matchOptions.find((o) => o.propertyId === selectedMatchPropertyId) ?? null
+  }, [matchOptions, selectedMatchPropertyId])
+
+  async function handleMatchListingChange(propertyId: string | null) {
+    if (!user || !selectedConversationId) return
+
+    setSavingMatchContext(true)
+    setError(null)
+
+    const { error: upErr } = await supabase
+      .from('message_threads')
+      .update({ property_id: propertyId })
+      .eq('id', selectedConversationId)
+
+    setSavingMatchContext(false)
+
+    if (upErr) {
+      setError(upErr.message)
+      return
+    }
+
+    setSelectedMatchPropertyId(propertyId)
+
+    const opt = propertyId ? matchOptions.find((o) => o.propertyId === propertyId) : null
+    setConversations((prev) =>
+      prev.map((c) => {
+        if (c.id !== selectedConversationId) return c
+        return {
+          ...c,
+          focusPropertyId: propertyId,
+          property: opt?.label ?? '',
+          propertyAddress: opt?.address ?? '',
+          propertyPrice: opt?.rent ?? '',
+        }
+      }),
+    )
+  }
+
   async function handleSendMessage() {
     if (!user || !selectedConversationId || !messageInput.trim()) return
 
@@ -287,6 +472,7 @@ export function MessagingPage() {
       thread_id: selectedConversationId,
       sender_id: user.id,
       body: messageInput.trim(),
+      property_id: selectedMatchPropertyId,
     })
 
     setSendingMessage(false)
@@ -299,11 +485,7 @@ export function MessagingPage() {
     setMessageInput('')
     setStatusMessage('Message sent')
 
-    const { data } = await supabase
-      .from('messages')
-      .select('id, thread_id, sender_id, body, created_at, sender:sender_id(display_name)')
-      .eq('thread_id', selectedConversationId)
-      .order('created_at', { ascending: true })
+    const { data } = await messagesQueryForListing(selectedConversationId, selectedMatchPropertyId)
 
     setMessages(
       ((data ?? []) as unknown as MessageRow[]).map((message) => ({
@@ -376,8 +558,21 @@ export function MessagingPage() {
 
   return (
     <>
-      <div className="min-h-[calc(100vh-10rem)] overflow-hidden rounded-xl border border-gray-200 bg-white">
-        <div className="grid min-h-[calc(100vh-10rem)] grid-cols-[220px_minmax(0,1fr)]">
+      <div className="flex min-h-[calc(100vh-10rem)] flex-col overflow-hidden rounded-xl border border-gray-200 bg-white">
+        {returnToProfile ? (
+          <div className="flex-shrink-0 border-b border-gray-200 bg-white px-4 py-2.5">
+            <Link
+              to={returnToProfile}
+              className="inline-flex items-center gap-2 text-sm font-medium text-gray-700 hover:text-gray-900"
+            >
+              <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+              </svg>
+              Back to tenant profile
+            </Link>
+          </div>
+        ) : null}
+        <div className="grid min-h-0 flex-1 grid-cols-[220px_minmax(0,1fr)] overflow-hidden">
           <div className="border-r border-gray-200 bg-white">
             <div className="border-b border-gray-100 px-3 py-3">
               <div className="relative">
@@ -418,7 +613,11 @@ export function MessagingPage() {
                           <p className="truncate text-sm font-medium text-gray-900">{conversation.name}</p>
                           <span className="mt-1 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-gray-500" />
                         </div>
-                        <p className="mt-1 truncate text-xs text-gray-500">{conversation.property}</p>
+                        {conversation.property ? (
+                          <p className="mt-1 truncate text-xs text-gray-500">{conversation.property}</p>
+                        ) : (
+                          <p className="mt-1 truncate text-xs text-gray-400">Direct messages</p>
+                        )}
                         <p className="mt-1 line-clamp-2 text-sm leading-6 text-gray-700">{conversation.preview}</p>
                         <p className="mt-1 text-xs text-gray-400">{conversation.timeAgo}</p>
                       </div>
@@ -434,14 +633,54 @@ export function MessagingPage() {
               <>
                 <div className="border-b border-gray-200 bg-white px-4 py-3">
                   <div className="flex items-start justify-between gap-4">
-                    <div className="flex items-start gap-3">
-                      <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-gray-200 text-[10px] font-medium text-white/90">
-                        Property
-                      </div>
-                      <div>
-                        <h1 className="text-[1.35rem] font-medium text-gray-900">{activeConversation.property}</h1>
-                        <p className="mt-0.5 text-sm text-gray-600">{activeConversation.propertyAddress}</p>
-                        <p className="mt-0.5 text-sm text-gray-700">{activeConversation.propertyPrice}</p>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-start gap-3">
+                        <Avatar name={activeConversation.name} />
+                        <div className="min-w-0 flex-1">
+                          <h1 className="truncate text-[1.35rem] font-medium text-gray-900">
+                            {activeConversation.name}
+                          </h1>
+                          <p className="mt-2 text-xs font-medium uppercase tracking-wide text-gray-400">
+                            Match / listing context
+                          </p>
+                          <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                            <label htmlFor="match-listing-select" className="sr-only">
+                              Choose listing to discuss
+                            </label>
+                            <select
+                              id="match-listing-select"
+                              value={selectedMatchPropertyId ?? ''}
+                              disabled={loadingMatchOptions || savingMatchContext}
+                              onChange={(e) => {
+                                const v = e.target.value
+                                handleMatchListingChange(v === '' ? null : v)
+                              }}
+                              className="max-w-full min-w-0 flex-1 rounded-lg border border-gray-200 bg-white py-2 pl-3 pr-8 text-sm text-gray-800 focus:border-gray-300 focus:outline-none disabled:opacity-60"
+                            >
+                              <option value="">
+                                {loadingMatchOptions
+                                  ? 'Loading listings…'
+                                  : 'General — not about a specific listing'}
+                              </option>
+                              {matchOptions.map((o) => (
+                                <option key={o.propertyId} value={o.propertyId}>
+                                  {o.label}
+                                  {o.rent ? ` · ${o.rent}` : ''} ({applicationStatusLabel(o.status)})
+                                </option>
+                              ))}
+                            </select>
+                            {savingMatchContext ? (
+                              <span className="text-xs text-gray-400">Saving…</span>
+                            ) : null}
+                          </div>
+                          {selectedListing ? (
+                            <p className="mt-2 text-sm text-gray-600">{selectedListing.address}</p>
+                          ) : selectedMatchPropertyId == null && !loadingMatchOptions ? (
+                            <p className="mt-2 text-sm text-gray-500">
+                              Pick a listing to tie messages to an application, or stay general.
+                            </p>
+                          ) : null}
+                        </div>
                       </div>
                     </div>
                     <button
@@ -461,7 +700,11 @@ export function MessagingPage() {
                   {loadingMessages ? (
                     <p className="text-sm text-gray-500">Loading messages...</p>
                   ) : messages.length === 0 ? (
-                    <p className="text-sm text-gray-500">No messages yet. Start the conversation below.</p>
+                    <p className="text-sm text-gray-500">
+                      {selectedMatchPropertyId
+                        ? 'No messages for this listing yet. Start the thread below.'
+                        : 'No general messages yet. Pick a listing above for listing-specific chat, or start below.'}
+                    </p>
                   ) : (
                     messages.map((message) => (
                       <div
@@ -512,11 +755,23 @@ export function MessagingPage() {
                 ) : null}
 
                 <div className="border-t border-gray-200 bg-white px-4 py-3">
+                  {selectedListing ? (
+                    <p className="mb-2 text-xs text-gray-500">
+                      Sending in context of:{' '}
+                      <span className="font-medium text-gray-700">{selectedListing.label}</span>
+                    </p>
+                  ) : null}
                   <div className="flex items-center gap-3">
                     <input
                       type="text"
                       value={messageInput}
                       onChange={(event) => setMessageInput(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key !== 'Enter' || event.shiftKey) return
+                        event.preventDefault()
+                        if (sendingMessage || !messageInput.trim()) return
+                        void handleSendMessage()
+                      }}
                       placeholder="Type your message..."
                       className="flex-1 rounded-lg border border-gray-200 px-4 py-3 text-sm text-gray-700 placeholder:text-gray-400 focus:border-gray-300 focus:outline-none"
                     />
@@ -539,7 +794,7 @@ export function MessagingPage() {
                 <div>
                   <h2 className="text-[1.4rem] font-medium text-gray-900">No conversations yet</h2>
                   <p className="mt-3 max-w-md text-sm leading-7 text-gray-600">
-                    Messages will appear here once tenants and landlords start a thread around a property.
+                    Messages will appear here once you start a conversation with a tenant or landlord.
                   </p>
                 </div>
               </div>

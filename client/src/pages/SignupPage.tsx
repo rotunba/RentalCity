@@ -88,7 +88,7 @@ export function SignupPage() {
       if (role === 'landlord') {
         navigate('/onboarding/profile', { replace: true })
       } else {
-        navigate('/onboarding/rental-needs', { replace: true })
+        navigate('/rental-needs', { replace: true })
       }
       return
     }

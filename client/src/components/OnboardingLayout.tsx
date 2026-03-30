@@ -32,7 +32,7 @@ export function OnboardingLayout() {
 
       <footer className="border-t border-gray-200 bg-white py-5">
         <div className="mx-auto flex max-w-6xl flex-col gap-3 px-4 text-sm text-gray-500 sm:flex-row sm:items-center sm:justify-between">
-          <span>© 2025 Rental City. All rights reserved.</span>
+          <span>© 2026 Rental City. All rights reserved.</span>
           <div className="flex flex-wrap items-center gap-4">
             <Link to="/privacy" className="hover:text-gray-700">
               Privacy Policy

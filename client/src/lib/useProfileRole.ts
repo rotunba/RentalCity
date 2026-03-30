@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import type { User } from '@supabase/supabase-js'
 import { supabase } from './supabase'
 
@@ -12,6 +12,8 @@ export type UseProfileRoleResult = {
   /** Set when role is tenant and they have completed the compatibility survey */
   tenantSurveyCompletedAt: string | null
   loading: boolean
+  /** Call to refetch profile (e.g. after completing questionnaire so matches page has fresh survey state) */
+  refetch: () => Promise<void>
 }
 
 /**
@@ -24,6 +26,29 @@ export function useProfileRole(user: User | null): UseProfileRoleResult {
   const [landlordSurveyCompletedAt, setLandlordSurveyCompletedAt] = useState<string | null>(null)
   const [tenantSurveyCompletedAt, setTenantSurveyCompletedAt] = useState<string | null>(null)
   const [loading, setLoading] = useState(!!user)
+
+  const refetch = useCallback(async () => {
+    if (!user) return
+    setLoading(true)
+    const { data } = await supabase
+      .from('profiles')
+      .select('role, display_name, landlord_survey_completed_at, tenant_survey_completed_at')
+      .eq('id', user.id)
+      .maybeSingle()
+
+    let resolved: ProfileRole = data?.role === 'landlord' ? 'landlord' : 'tenant'
+    const signedUpAsLandlord = user.user_metadata?.role === 'landlord'
+    if (signedUpAsLandlord && resolved !== 'landlord') {
+      await supabase.from('profiles').update({ role: 'landlord' }).eq('id', user.id)
+      resolved = 'landlord'
+    }
+
+    setRole(resolved)
+    setDisplayName(data?.display_name?.trim() || null)
+    setLandlordSurveyCompletedAt(data?.landlord_survey_completed_at ?? null)
+    setTenantSurveyCompletedAt(data?.tenant_survey_completed_at ?? null)
+    setLoading(false)
+  }, [user])
 
   useEffect(() => {
     if (!user) {
@@ -68,5 +93,5 @@ export function useProfileRole(user: User | null): UseProfileRoleResult {
     }
   }, [user])
 
-  return { role, displayName, landlordSurveyCompletedAt, tenantSurveyCompletedAt, loading }
+  return { role, displayName, landlordSurveyCompletedAt, tenantSurveyCompletedAt, loading, refetch }
 }
