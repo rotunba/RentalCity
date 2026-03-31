@@ -563,47 +563,7 @@ export function AccountPage() {
               </div>
             )}
           </Card>
-        </div>
 
-        <div className="space-y-4">
-          <Card title="Application Status">
-            <UniversalApplicationStatusFields
-              statusLabel={universalStatusLabel}
-              validUntilText={validUntilText}
-              remainingText={remainingText}
-              remainingBarWidthPct={remainingBarWidthPct}
-              isUniversalActive={isUniversalActive}
-              action={
-                <Link
-                  to="/applications/apply"
-                  className={`${UNIVERSAL_APPLICATION_STATUS_ACTION_CLASS} hover:bg-gray-800`}
-                >
-                  <span>{isUniversalActive ? 'Update rental application' : 'Start rental application'}</span>
-                  <svg className="h-4 w-4 shrink-0 opacity-90" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                  </svg>
-                </Link>
-              }
-            />
-          </Card>
-
-          <VerificationStatusCard />
-
-          <Card title="Profile Stats">
-            <div className="space-y-4 text-sm">
-              <div className="flex items-center justify-between">
-                <span className="text-gray-500">Profile Views</span>
-                <span className="text-gray-900">0</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-gray-500">Response Rate</span>
-                <span className="text-gray-900">—</span>
-              </div>
-            </div>
-          </Card>
-        </div>
-
-        <div className="lg:col-span-2">
           <Card title={TENANT_REVIEWS_CARD_TITLE}>
             <div className="min-w-0 flex-1">
               <p className="text-sm text-gray-500">{TENANT_REVIEWS_DESCRIPTION_AS_TENANT}</p>
@@ -641,6 +601,44 @@ export function AccountPage() {
                   ) : null}
                 </>
               )}
+            </div>
+          </Card>
+        </div>
+
+        <div className="space-y-4">
+          <Card title="Application Status">
+            <UniversalApplicationStatusFields
+              statusLabel={universalStatusLabel}
+              validUntilText={validUntilText}
+              remainingText={remainingText}
+              remainingBarWidthPct={remainingBarWidthPct}
+              isUniversalActive={isUniversalActive}
+              action={
+                <Link
+                  to="/applications/apply"
+                  className={`${UNIVERSAL_APPLICATION_STATUS_ACTION_CLASS} hover:bg-gray-800`}
+                >
+                  <span>{isUniversalActive ? 'Update rental application' : 'Start rental application'}</span>
+                  <svg className="h-4 w-4 shrink-0 opacity-90" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
+                </Link>
+              }
+            />
+          </Card>
+
+          <VerificationStatusCard />
+
+          <Card title="Profile Stats">
+            <div className="space-y-4 text-sm">
+              <div className="flex items-center justify-between">
+                <span className="text-gray-500">Profile Views</span>
+                <span className="text-gray-900">0</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-gray-500">Response Rate</span>
+                <span className="text-gray-900">—</span>
+              </div>
             </div>
           </Card>
         </div>

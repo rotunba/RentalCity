@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { formatBedrooms, formatCurrency } from '../lib/propertyDraft'
 import { useAuth } from '../lib/useAuth'
@@ -11,6 +10,12 @@ import {
   fetchMatchesForLandlord,
   type MatchResult,
 } from '../lib/matchesApi'
+import { TenantRentScoreBreakdownDialog } from '../components/TenantRentScoreBreakdownDialog'
+import {
+  computeTenantRentScoreFromDimensions,
+  dimensionsFromTenantQuestionnaireRow,
+  type TenantRentScoreDimensions,
+} from '../lib/tenantRentScore'
 
 type MatchCard = {
   id: string
@@ -170,7 +175,7 @@ function saveSavedIds(ids: Set<string>) {
   localStorage.setItem(SAVED_IDS_KEY, JSON.stringify([...ids]))
 }
 
-type MatchDimensions = { affordability: number; stability: number; risk: number; lifestyle: number; policy: number }
+type MatchDimensions = TenantRentScoreDimensions
 
 const DIMENSION_LABELS: { key: keyof MatchDimensions; emoji: string; label: string }[] = [
   { key: 'affordability', emoji: '💰', label: 'Affordability' },
@@ -178,15 +183,6 @@ const DIMENSION_LABELS: { key: keyof MatchDimensions; emoji: string; label: stri
   { key: 'risk', emoji: '🛡️', label: 'Risk fit' },
   { key: 'lifestyle', emoji: '✨', label: 'Lifestyle' },
   { key: 'policy', emoji: '📋', label: 'Policy' },
-]
-
-// Rent Score uses same keys; 5th dimension is "Space fit" (from questionnaire)
-const RENT_SCORE_LABELS: { key: keyof MatchDimensions; emoji: string; label: string }[] = [
-  { key: 'affordability', emoji: '💰', label: 'Affordability' },
-  { key: 'stability', emoji: '🏠', label: 'Stability' },
-  { key: 'risk', emoji: '🛡️', label: 'Payment risk' },
-  { key: 'lifestyle', emoji: '✨', label: 'Lifestyle' },
-  { key: 'policy', emoji: '📋', label: 'Space fit' },
 ]
 
 const DIMENSION_WEIGHTS: Record<keyof MatchDimensions, number> = {
@@ -216,16 +212,6 @@ function ScoreBar({ value, max = 10 }: { value: number; max?: number }) {
       />
     </div>
   )
-}
-
-function computeOverallFromDimensions(dimensions: MatchDimensions): number {
-  const overall0to1 =
-    0.35 * (dimensions.affordability / 10) +
-    0.25 * (dimensions.stability / 10) +
-    0.25 * (dimensions.risk / 10) +
-    0.1 * (dimensions.lifestyle / 10) +
-    0.05 * (dimensions.policy / 10)
-  return Math.round(Math.max(0, Math.min(1, overall0to1)) * 100)
 }
 
 function getDimensionContribution(key: keyof MatchDimensions, score: number): number {
@@ -347,7 +333,7 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
   const [landlordProperties, setLandlordProperties] = useState<Array<{ id: string; label: string }>>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const MATCHES_PAGE_SIZE = 9
+  const MATCHES_PAGE_SIZE = 6
   const TENANT_MATCHES_PAGE_SIZE = 6
   /** Eligible tenant ↔ property matches (questionnaire complete), by match score */
   const MAX_TENANT_TOP_MATCHES = 10
@@ -397,22 +383,10 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
       .eq('user_id', user.id)
       .maybeSingle()
     if (data) {
-      const n = (v: unknown) => {
-        const raw = Number(v) || 0
-        // Backward-compat: some historical rows were stored in 0-100 scale.
-        const normalized = raw > 10 ? raw / 10 : raw
-        return Math.max(0, Math.min(10, normalized))
-      }
-      const dimensions = {
-        affordability: n(data.affordability_score),
-        stability: n(data.stability_score),
-        risk: n(data.payment_risk_score),
-        lifestyle: n(data.lifestyle_score),
-        policy: n(data.space_fit_score),
-      }
+      const dimensions = dimensionsFromTenantQuestionnaireRow(data)
       setTenantDimensionScores(dimensions)
-      // Keep UI internally consistent even if stored overall_score is stale.
-      setTenantOverallScore(computeOverallFromDimensions(dimensions))
+      // Same 0–100 figure as landlord tenant profile; ignores stale overall_score column.
+      setTenantOverallScore(computeTenantRentScoreFromDimensions(dimensions))
     } else {
       setTenantOverallScore(null)
       setTenantDimensionScores(null)
@@ -1230,33 +1204,34 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
               </div>
 
               <div className="border-t border-gray-100 pt-4">
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:gap-4">
-                  <span className="shrink-0 pt-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500 sm:w-24">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
+                  <span className="shrink-0 text-xs font-semibold uppercase tracking-wide text-gray-500 sm:w-24 sm:pt-0">
                     Matches
                   </span>
-                  <div className="flex min-w-0 flex-1 flex-wrap gap-2">
-                    {([
-                      { value: 'all' as const, label: 'All' },
-                      { value: 'applications' as const, label: 'Applications' },
-                      { value: 'prospects' as const, label: 'Prospects' },
-                      { value: 'locked' as const, label: 'Locked' },
-                      { value: 'unlocked' as const, label: 'Unlocked' },
-                      { value: 'accepted' as const, label: 'Accepted' },
-                      { value: 'declined' as const, label: 'Declined' },
-                    ] as const).map((item) => (
-                      <button
-                        key={item.value}
-                        type="button"
-                        onClick={() => setLandlordFilter(item.value)}
-                        className={`rounded-full px-3 py-1.5 text-xs transition-colors ${
-                          landlordFilter === item.value
-                            ? 'bg-gray-900 text-white'
-                            : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                        }`}
-                      >
-                        {item.label}
-                      </button>
-                    ))}
+                  <div className="relative min-w-[min(100%,16rem)] max-w-md flex-1 sm:min-w-[14rem]">
+                    <select
+                      value={landlordFilter}
+                      onChange={(event) =>
+                        setLandlordFilter(event.target.value as LandlordMatchFilter)
+                      }
+                      className="w-full appearance-none rounded-lg border border-gray-200 bg-white px-4 py-2.5 pr-10 text-sm text-gray-700 focus:border-gray-300 focus:outline-none"
+                    >
+                      <option value="all">All matches</option>
+                      <option value="applications">Applications</option>
+                      <option value="prospects">Prospects</option>
+                      <option value="locked">Locked</option>
+                      <option value="unlocked">Unlocked</option>
+                      <option value="accepted">Accepted</option>
+                      <option value="declined">Declined</option>
+                    </select>
+                    <svg
+                      className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
                   </div>
                 </div>
               </div>
@@ -1311,19 +1286,32 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
                 key={match.id}
                 className="flex h-full flex-col rounded-xl border border-gray-200 bg-white p-4"
               >
-                <Link
-                  to={landlordTenantProfilePath(match)}
-                  state={tenantProfileNavState}
-                  className="group flex min-h-0 flex-1 flex-col rounded-lg text-left outline-none focus-visible:ring-2 focus-visible:ring-gray-400 focus-visible:ring-offset-2"
-                >
+                <>
                   <div className="flex items-start justify-between gap-4">
                     <div className="flex min-w-0 flex-1 items-start gap-3">
-                      <LandlordAvatar name={match.name} avatarUrl={match.avatarUrl} />
+                      <Link
+                        to={landlordTenantProfilePath(match)}
+                        state={tenantProfileNavState}
+                        className="shrink-0 rounded-full outline-none focus-visible:ring-2 focus-visible:ring-gray-400 focus-visible:ring-offset-2"
+                        aria-label={`${match.name} profile`}
+                      >
+                        <LandlordAvatar name={match.name} avatarUrl={match.avatarUrl} />
+                      </Link>
                       <div className="min-w-0">
-                        <p className="text-[1.15rem] font-medium text-gray-900 group-hover:underline decoration-gray-400 underline-offset-2">
+                        <Link
+                          to={landlordTenantProfilePath(match)}
+                          state={tenantProfileNavState}
+                          className="block text-[1.15rem] font-medium text-gray-900 hover:underline decoration-gray-400 underline-offset-2"
+                        >
                           {match.name}
-                        </p>
-                        <p className="mt-0.5 text-sm font-medium text-gray-700">{match.listingLabel}</p>
+                        </Link>
+                        <Link
+                          to={`/properties/${encodeURIComponent(match.propertyId)}`}
+                          state={{ from: `${location.pathname}${location.search}` }}
+                          className="mt-0.5 block text-sm font-medium text-gray-700 hover:text-gray-900 hover:underline decoration-gray-400 underline-offset-2"
+                        >
+                          {match.listingLabel}
+                        </Link>
                         <p className="mt-0.5 text-sm text-gray-500">{match.appliedAgo}</p>
                       </div>
                     </div>
@@ -1344,7 +1332,12 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
                     </span>
                   </div>
 
-                  <div className="mt-5 flex min-h-0 flex-1 flex-col">
+                  <Link
+                    to={landlordTenantProfilePath(match)}
+                    state={tenantProfileNavState}
+                    className="group mt-5 flex min-h-0 flex-1 flex-col rounded-lg text-left outline-none focus-visible:ring-2 focus-visible:ring-gray-400 focus-visible:ring-offset-2"
+                  >
+                  <div className="flex min-h-0 flex-1 flex-col">
                     <div className="space-y-3 text-sm">
                       {(() => {
                         const matchData = match.matchPreview ?? matchByTenantId[match.tenantId]
@@ -1407,7 +1400,8 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
                       })()}
                     </div>
                   </div>
-                </Link>
+                  </Link>
+                </>
 
                 {match.hasApplication &&
                 (workflow === 'locked' || workflow === 'declined' || workflow === 'unlocked') ? (
@@ -1665,79 +1659,13 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
                 </Link>
               )}
             </div>
-            {rentScoreBreakdownOpen && tenantOverallScore != null &&
-              createPortal(
-                <>
-                  <div
-                    className="fixed inset-0 z-[100] bg-black/20"
-                    aria-hidden
-                    onClick={() => setRentScoreBreakdownOpen(false)}
-                  />
-                  <div
-                    className="fixed z-[101] w-[min(20rem,calc(100vw-2rem)) rounded-xl border border-gray-200 bg-white p-4 shadow-xl"
-                    style={{
-                      left: '50%',
-                      top: '50%',
-                      transform: 'translate(-50%, -50%)',
-                    }}
-                    role="dialog"
-                    aria-labelledby="rent-score-breakdown-title"
-                  >
-                    <div className="flex items-center justify-between gap-2 mb-3">
-                      <span id="rent-score-breakdown-title" className="font-semibold text-gray-900">Rent Score breakdown</span>
-                      <button
-                        type="button"
-                        onClick={() => setRentScoreBreakdownOpen(false)}
-                        className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
-                        aria-label="Close"
-                      >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                        </svg>
-                      </button>
-                    </div>
-                    <div className="flex items-center gap-2 flex-wrap mb-3">
-                      <span className={`inline-flex h-8 w-8 items-center justify-center rounded-full border-2 text-sm font-semibold text-gray-800 ${scoreBarColor(Math.min(100, tenantOverallScore)).border}`}>
-                        {tenantOverallScore}
-                      </span>
-                      <div className="flex-1 min-w-[60px] h-2 overflow-hidden rounded-full bg-gray-200">
-                        <div
-                          className={`h-full rounded-full transition-[width] ${scoreBarColor(Math.min(100, tenantOverallScore)).bg}`}
-                          style={{ width: `${Math.min(100, tenantOverallScore)}%` }}
-                        />
-                      </div>
-                    </div>
-                    <div className="space-y-2">
-                      {tenantDimensionScores
-                        ? RENT_SCORE_LABELS.map(({ key, emoji, label }) => {
-                            const score = tenantDimensionScores[key] ?? 0
-                            const contribution = getDimensionContribution(key, score)
-                            const maxContribution = getDimensionMaxContribution(key)
-                            return (
-                              <div key={key} className="flex items-center gap-2 text-xs">
-                                <span className="w-5 text-center shrink-0">{emoji}</span>
-                                <span className="text-gray-700 min-w-[8rem]">{label}</span>
-                                <ScoreBar value={contribution} max={maxContribution} />
-                                <span className="text-gray-500 min-w-[8ch] text-right">
-                                  {formatContribution(contribution)} / {formatContribution(maxContribution)}
-                                </span>
-                              </div>
-                            )
-                          })
-                        : (
-                          <p className="text-xs text-gray-500 py-2">Loading dimension scores…</p>
-                        )}
-                    </div>
-                    <p className="mt-3 text-xs text-gray-500">
-                      Based on your questionnaire. Update in{' '}
-                      <Link to="/tenant-questionnaire" className="text-emerald-600 hover:underline" onClick={() => setRentScoreBreakdownOpen(false)}>
-                        questionnaire
-                      </Link>.
-                    </p>
-                  </div>
-                </>,
-                document.body
-              )}
+            <TenantRentScoreBreakdownDialog
+              open={rentScoreBreakdownOpen && tenantOverallScore != null}
+              onClose={() => setRentScoreBreakdownOpen(false)}
+              overallScore={tenantOverallScore ?? 0}
+              dimensions={tenantDimensionScores}
+              variant="tenant"
+            />
           </div>
         )}
       </div>

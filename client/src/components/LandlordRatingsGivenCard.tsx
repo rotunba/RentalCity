@@ -8,7 +8,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 type LandlordRatingsGivenCardProps = {
   /**
    * When a number, only that many most recent rows are listed on the account home,
-   * with a link to the full list when there are more. Pass `null` to show every row (full page).
+   * with a link to the full list when there are more (default 2). Pass `null` to show every row (full page).
    */
   maxPreviewItems?: number | null
   /** Omit title + helper when the parent page already shows them. */
@@ -69,7 +69,7 @@ function RatingListItem({ row, returnTo }: { row: LandlordRatingGivenRow; return
 
 /** Landlord Account: lists tenant ratings this landlord submitted. */
 export function LandlordRatingsGivenCard({
-  maxPreviewItems = 5,
+  maxPreviewItems = 2,
   hideHeader = false,
   className = '',
 }: LandlordRatingsGivenCardProps = {}) {

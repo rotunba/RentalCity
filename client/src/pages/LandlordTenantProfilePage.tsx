@@ -8,6 +8,7 @@ import {
   TENANT_REVIEW_PRIMARY_BUTTON_CLASSNAME,
   TenantReviewListRowContent,
 } from '../components/TenantReviewDisplay'
+import { TenantRentScoreBreakdownDialog } from '../components/TenantRentScoreBreakdownDialog'
 import { UniversalApplicationStatusFields } from '../components/UniversalApplicationStatusFields'
 import { TenantReviewEditDialog } from '../components/TenantReviewEditDialog'
 import { VerificationStatusCard } from '../components/VerificationStatusChecklist'
@@ -21,6 +22,11 @@ import {
   universalApplicationRpcRows,
   type UniversalApplicationRecord,
 } from '../lib/universalApplicationDisplay'
+import {
+  computeTenantRentScoreFromDimensions,
+  dimensionsFromTenantQuestionnaireRow,
+  type TenantRentScoreDimensions,
+} from '../lib/tenantRentScore'
 import { getTenantQuestionnaireChoiceLabel } from '../lib/tenantQuestionnaire'
 import {
   hasTenantLeasePreferencesData,
@@ -92,7 +98,9 @@ export function LandlordTenantProfilePage() {
     has_pets: boolean | null
     living_situation: string | null
   } | null>(null)
-  const [questionnaire, setQuestionnaire] = useState<{ overall_score: number | null } | null>(null)
+  const [tenantRentScore, setTenantRentScore] = useState<number | null>(null)
+  const [tenantRentDimensions, setTenantRentDimensions] = useState<TenantRentScoreDimensions | null>(null)
+  const [tenantRentBreakdownOpen, setTenantRentBreakdownOpen] = useState(false)
   const [tenantQuestionnaireAnswers, setTenantQuestionnaireAnswers] = useState<Record<string, unknown> | null>(null)
   const [pendingApplicationId, setPendingApplicationId] = useState<string | null>(null)
   const [applicationPropertyId, setApplicationPropertyId] = useState<string | null>(null)
@@ -135,7 +143,7 @@ export function LandlordTenantProfilePage() {
     id,
     name: profile?.display_name?.trim() || 'Tenant',
     subtitle: profile?.city ? profile.city : '',
-    tenantScore: questionnaire?.overall_score ?? null,
+    tenantScore: tenantRentScore,
     tags: [] as string[],
     creditScoreRange: '—',
     creditScoreLabel: 'Not provided',
@@ -191,7 +199,10 @@ export function LandlordTenantProfilePage() {
     [tenantReviewsList, user],
   )
 
-  const profileReviewsPreview = useMemo(() => tenantReviewsList.slice(0, 4), [tenantReviewsList])
+  const profileReviewsPreview = useMemo(
+    () => tenantReviewsList.slice(0, TENANT_LANDLORD_REVIEWS_PREVIEW_COUNT),
+    [tenantReviewsList],
+  )
   const previewShowsMyReview = useMemo(
     () => profileReviewsPreview.some((r) => r.landlord_id === user?.id),
     [profileReviewsPreview, user?.id],
@@ -279,7 +290,13 @@ export function LandlordTenantProfilePage() {
       ] = await Promise.all([
         supabase.from('profiles').select('display_name, bio, city, avatar_url, created_at').eq('id', id).maybeSingle(),
         supabase.from('tenant_preferences').select('move_in_date, lease_length_months, min_budget_cents, max_budget_cents, has_pets, living_situation').eq('user_id', id).maybeSingle(),
-        supabase.from('tenant_questionnaire').select('overall_score, answers').eq('user_id', id).maybeSingle(),
+        supabase
+          .from('tenant_questionnaire')
+          .select(
+            'affordability_score, stability_score, payment_risk_score, lifestyle_score, space_fit_score, answers',
+          )
+          .eq('user_id', id)
+          .maybeSingle(),
         supabase
           .from('applications')
           .select(
@@ -323,10 +340,13 @@ export function LandlordTenantProfilePage() {
       }
       if (questionnaireData) {
         const answers = (questionnaireData as { answers?: Record<string, unknown> }).answers ?? {}
-        setQuestionnaire({ overall_score: questionnaireData.overall_score ?? null })
+        const dims = dimensionsFromTenantQuestionnaireRow(questionnaireData)
+        setTenantRentDimensions(dims)
+        setTenantRentScore(computeTenantRentScoreFromDimensions(dims))
         setTenantQuestionnaireAnswers(answers)
       } else {
-        setQuestionnaire(null)
+        setTenantRentDimensions(null)
+        setTenantRentScore(null)
         setTenantQuestionnaireAnswers(null)
       }
 
@@ -596,46 +616,75 @@ export function LandlordTenantProfilePage() {
         <div className="mt-5 grid gap-4 lg:grid-cols-[minmax(0,1fr)_200px] lg:items-start">
               <div className="min-w-0 space-y-4">
                 <ProfileContentCard title="Bio">
-                  <div className="flex items-start gap-4">
-                    <TenantAvatar name={tenant.name} avatarUrl={profile?.avatar_url ?? null} sizeClass="h-12 w-12" textClass="text-xs" />
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2 gap-y-1">
-                        <h2 className="text-[1.75rem] font-medium text-gray-900">{tenant.name}</h2>
-                        {matchDecisionContext && isAccepted ? (
-                          <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-medium text-emerald-700">
-                            Accepted
-                          </span>
-                        ) : null}
-                        {matchDecisionContext && isDeclined ? (
-                          <span className="rounded-full bg-gray-900 px-3 py-1 text-xs font-medium text-white">
-                            Declined
-                          </span>
-                        ) : null}
-                        {matchDecisionContext && !isAccepted && !isDeclined && loadedApplicationStatus === 'pending' ? (
-                          <span className="rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-700">
-                            Pending
-                          </span>
-                        ) : null}
-                      </div>
-                      {(profile?.city || profile?.created_at) ? (
-                        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-gray-500">
-                          <span className="inline-flex items-center gap-1.5">
-                            <svg className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a2 2 0 01-2.828 0l-4.243-4.243a8 8 0 1111.314 0z" />
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
-                            </svg>
-                            {profile?.city?.trim() || 'City not listed'}
-                          </span>
-                          {profile?.created_at ? (
-                            <span className="inline-flex items-center gap-1.5">
-                              <svg className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10m-11 9h12a2 2 0 002-2V7a2 2 0 00-2-2H6a2 2 0 00-2 2v11a2 2 0 002 2z" />
-                              </svg>
-                              Member since {new Date(profile.created_at).getFullYear()}
+                  <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="flex min-w-0 flex-1 items-start gap-4">
+                      <TenantAvatar name={tenant.name} avatarUrl={profile?.avatar_url ?? null} sizeClass="h-12 w-12" textClass="text-xs" />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2 gap-y-1">
+                          <h2 className="text-[1.75rem] font-medium text-gray-900">{tenant.name}</h2>
+                          {matchDecisionContext && isAccepted ? (
+                            <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-medium text-emerald-700">
+                              Accepted
+                            </span>
+                          ) : null}
+                          {matchDecisionContext && isDeclined ? (
+                            <span className="rounded-full bg-gray-900 px-3 py-1 text-xs font-medium text-white">
+                              Declined
+                            </span>
+                          ) : null}
+                          {matchDecisionContext && !isAccepted && !isDeclined && loadedApplicationStatus === 'pending' ? (
+                            <span className="rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-700">
+                              Pending
                             </span>
                           ) : null}
                         </div>
-                      ) : null}
+                        {(profile?.city || profile?.created_at) ? (
+                          <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-gray-500">
+                            <span className="inline-flex items-center gap-1.5">
+                              <svg className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a2 2 0 01-2.828 0l-4.243-4.243a8 8 0 1111.314 0z" />
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                              </svg>
+                              {profile?.city?.trim() || 'City not listed'}
+                            </span>
+                            {profile?.created_at ? (
+                              <span className="inline-flex items-center gap-1.5">
+                                <svg className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10m-11 9h12a2 2 0 002-2V7a2 2 0 00-2-2H6a2 2 0 00-2 2v11a2 2 0 002 2z" />
+                                </svg>
+                                Member since {new Date(profile.created_at).getFullYear()}
+                              </span>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                    <div className="flex shrink-0 flex-col items-center rounded-lg border border-gray-100 bg-gray-50/80 px-5 py-3 sm:self-start">
+                      <div className="flex items-center justify-center gap-1 text-xs text-gray-500">
+                        <span>Tenant Score</span>
+                        {tenant.tenantScore != null ? (
+                          <button
+                            type="button"
+                            onClick={() => setTenantRentBreakdownOpen(true)}
+                            className="rounded-full p-0.5 text-gray-400 hover:bg-gray-200/80 hover:text-gray-600"
+                            aria-label="Show score breakdown"
+                            title="See breakdown"
+                          >
+                            <svg className="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            </svg>
+                          </button>
+                        ) : (
+                          <span className="inline-flex text-gray-300" aria-hidden>
+                            <svg className="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            </svg>
+                          </span>
+                        )}
+                      </div>
+                      <div className="mx-auto mt-2 flex h-12 w-12 items-center justify-center rounded-full border-[3px] border-emerald-400 text-xl font-medium text-gray-900">
+                        {tenant.tenantScore != null ? tenant.tenantScore : '—'}
+                      </div>
                     </div>
                   </div>
                   <p className="mt-5 max-w-2xl text-sm leading-8 text-gray-700">
@@ -706,87 +755,7 @@ export function LandlordTenantProfilePage() {
                     <LockedProfileSection title="Lease Preferences" />
                   </>
                 )}
-              </div>
 
-              <div className="space-y-4 lg:sticky lg:top-4">
-                <ProfileContentCard title="Application Status">
-                  <UniversalApplicationStatusFields
-                    statusLabel={tenantUniversalDisplay.statusLabel}
-                    validUntilText={tenantUniversalDisplay.validUntilText}
-                    remainingText={tenantUniversalDisplay.remainingText}
-                    remainingBarWidthPct={tenantUniversalDisplay.remainingBarWidthPct}
-                    isUniversalActive={tenantUniversalDisplay.isUniversalActive}
-                    showTimeline={false}
-                  />
-                </ProfileContentCard>
-
-                <div className="rounded-xl border border-gray-200 bg-white px-4 py-3 text-center">
-                  <div className="flex items-center justify-center gap-1 text-xs text-gray-500">
-                    <span>Tenant Score</span>
-                    <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                  </div>
-                  <div className="mx-auto mt-2 flex h-12 w-12 items-center justify-center rounded-full border-[3px] border-emerald-400 text-xl font-medium text-gray-900">
-                    {tenant.tenantScore != null ? tenant.tenantScore : '—'}
-                  </div>
-                </div>
-
-                <VerificationStatusCard />
-
-                <div className="space-y-2">
-                  {hasUnlockedProfileAccess ? (
-                    <>
-                      <Link
-                        to={inboxHref}
-                        className="inline-flex w-full min-h-[44px] items-center justify-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-3 text-center text-sm font-medium text-gray-700 hover:bg-gray-50"
-                      >
-                        <svg className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4-.8L3 20l1.385-3.231C3.512 15.477 3 13.79 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-                        </svg>
-                        Go to Inbox
-                      </Link>
-                      <Link
-                        to={`/matches?tenant=${encodeURIComponent(id)}`}
-                        className="inline-flex w-full min-h-[44px] items-center justify-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-3 text-center text-sm font-medium text-gray-700 hover:bg-gray-50"
-                      >
-                        <svg className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 7h10M7 12h10M7 17h10M4 7h.01M4 12h.01M4 17h.01" />
-                        </svg>
-                        View all matches
-                      </Link>
-                    </>
-                  ) : null}
-                  {canUnlockProfile ? (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setUnlockPayError(null)
-                          setUnlockPayModalOpen(true)
-                        }}
-                        className="inline-flex w-full min-h-[44px] items-center justify-center gap-2 rounded-lg bg-gray-900 px-4 py-3 text-sm font-medium text-white hover:bg-gray-800"
-                      >
-                        <svg className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 11c1.657 0 3-1.343 3-3V7a3 3 0 10-6 0v1c0 1.657 1.343 3 3 3zm-7 9h14a2 2 0 002-2v-5a2 2 0 00-2-2H5a2 2 0 00-2 2v5a2 2 0 002 2z" />
-                        </svg>
-                        Unlock full profile
-                      </button>
-                      <p className="text-center text-xs text-gray-400">One-time payment • Secure checkout via Stripe</p>
-                    </>
-                  ) : !hasUnlockedProfileAccess ? (
-                    <Link
-                      to="/matches"
-                      className="inline-flex w-full min-h-[44px] items-center justify-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm font-medium text-gray-700 hover:bg-gray-50"
-                    >
-                      Back to matches
-                    </Link>
-                  ) : null}
-                </div>
-              </div>
-            </div>
-
-            <div className="mt-4 w-full">
               {hasUnlockedProfileAccess ? (
                 <ProfileContentCard title={TENANT_REVIEWS_CARD_TITLE}>
                   <div className="min-w-0">
@@ -861,6 +830,72 @@ export function LandlordTenantProfilePage() {
               ) : (
                 <LockedProfileSection title={TENANT_REVIEWS_CARD_TITLE} />
               )}
+              </div>
+
+              <div className="space-y-4 lg:sticky lg:top-4">
+                <ProfileContentCard title="Application Status">
+                  <UniversalApplicationStatusFields
+                    statusLabel={tenantUniversalDisplay.statusLabel}
+                    validUntilText={tenantUniversalDisplay.validUntilText}
+                    remainingText={tenantUniversalDisplay.remainingText}
+                    remainingBarWidthPct={tenantUniversalDisplay.remainingBarWidthPct}
+                    isUniversalActive={tenantUniversalDisplay.isUniversalActive}
+                    showTimeline={false}
+                  />
+                </ProfileContentCard>
+
+                <VerificationStatusCard />
+
+                <div className="space-y-2">
+                  {hasUnlockedProfileAccess ? (
+                    <>
+                      <Link
+                        to={inboxHref}
+                        className="inline-flex w-full min-h-[44px] items-center justify-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-3 text-center text-sm font-medium text-gray-700 hover:bg-gray-50"
+                      >
+                        <svg className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4-.8L3 20l1.385-3.231C3.512 15.477 3 13.79 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                        </svg>
+                        Go to Inbox
+                      </Link>
+                      <Link
+                        to={`/matches?tenant=${encodeURIComponent(id)}`}
+                        className="inline-flex w-full min-h-[44px] items-center justify-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-3 text-center text-sm font-medium text-gray-700 hover:bg-gray-50"
+                      >
+                        <svg className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 7h10M7 12h10M7 17h10M4 7h.01M4 12h.01M4 17h.01" />
+                        </svg>
+                        View all matches
+                      </Link>
+                    </>
+                  ) : null}
+                  {canUnlockProfile ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setUnlockPayError(null)
+                          setUnlockPayModalOpen(true)
+                        }}
+                        className="inline-flex w-full min-h-[44px] items-center justify-center gap-2 rounded-lg bg-gray-900 px-4 py-3 text-sm font-medium text-white hover:bg-gray-800"
+                      >
+                        <svg className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 11c1.657 0 3-1.343 3-3V7a3 3 0 10-6 0v1c0 1.657 1.343 3 3 3zm-7 9h14a2 2 0 002-2v-5a2 2 0 00-2-2H5a2 2 0 00-2 2v5a2 2 0 002 2z" />
+                        </svg>
+                        Unlock full profile
+                      </button>
+                      <p className="text-center text-xs text-gray-400">One-time payment • Secure checkout via Stripe</p>
+                    </>
+                  ) : !hasUnlockedProfileAccess ? (
+                    <Link
+                      to="/matches"
+                      className="inline-flex w-full min-h-[44px] items-center justify-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                    >
+                      Back to matches
+                    </Link>
+                  ) : null}
+                </div>
+              </div>
             </div>
 
             {!isAccepted && !isDeclined && canDecidePending ? (
@@ -944,9 +979,25 @@ export function LandlordTenantProfilePage() {
                 <div className="min-w-[112px] rounded-xl border border-gray-200 bg-white px-4 py-3 text-center">
                   <div className="flex items-center justify-center gap-1 text-xs text-gray-500">
                     <span>Tenant Score</span>
-                    <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
+                    {tenant.tenantScore != null ? (
+                      <button
+                        type="button"
+                        onClick={() => setTenantRentBreakdownOpen(true)}
+                        className="rounded-full p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+                        aria-label="Show score breakdown"
+                        title="See breakdown"
+                      >
+                        <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                      </button>
+                    ) : (
+                      <span className="inline-flex text-gray-300" aria-hidden>
+                        <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                      </span>
+                    )}
                   </div>
                   <div className="mx-auto mt-2 flex h-12 w-12 items-center justify-center rounded-full border-[3px] border-emerald-400 text-xl font-medium text-gray-900">
                     {tenant.tenantScore != null ? tenant.tenantScore : '—'}
@@ -1089,6 +1140,14 @@ export function LandlordTenantProfilePage() {
           </div>
         </div>
       ) : null}
+
+      <TenantRentScoreBreakdownDialog
+        open={tenantRentBreakdownOpen && tenant.tenantScore != null}
+        onClose={() => setTenantRentBreakdownOpen(false)}
+        overallScore={tenant.tenantScore ?? 0}
+        dimensions={tenantRentDimensions}
+        variant="landlord"
+      />
 
       <TenantReviewEditDialog
         open={reviewEditOpen}

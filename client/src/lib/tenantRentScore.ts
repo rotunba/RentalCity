@@ -1,0 +1,83 @@
+/**
+ * Tenant “Rent Score” (0–100) shown on matches and landlord tenant profile.
+ * Derived from questionnaire dimension columns so it stays in sync when overall_score is stale.
+ */
+
+export type TenantRentScoreDimensions = {
+  affordability: number
+  stability: number
+  risk: number
+  lifestyle: number
+  policy: number
+}
+
+/** DB columns may be 0–10 or legacy 0–100. */
+export function normalizeTenantQuestionnaireDimension(v: unknown): number {
+  const raw = Number(v) || 0
+  const normalized = raw > 10 ? raw / 10 : raw
+  return Math.max(0, Math.min(10, normalized))
+}
+
+export function dimensionsFromTenantQuestionnaireRow(row: {
+  affordability_score?: unknown
+  stability_score?: unknown
+  payment_risk_score?: unknown
+  lifestyle_score?: unknown
+  space_fit_score?: unknown
+}): TenantRentScoreDimensions {
+  return {
+    affordability: normalizeTenantQuestionnaireDimension(row.affordability_score),
+    stability: normalizeTenantQuestionnaireDimension(row.stability_score),
+    risk: normalizeTenantQuestionnaireDimension(row.payment_risk_score),
+    lifestyle: normalizeTenantQuestionnaireDimension(row.lifestyle_score),
+    policy: normalizeTenantQuestionnaireDimension(row.space_fit_score),
+  }
+}
+
+export function computeTenantRentScoreFromDimensions(dimensions: TenantRentScoreDimensions): number {
+  const overall0to1 =
+    0.35 * (dimensions.affordability / 10) +
+    0.25 * (dimensions.stability / 10) +
+    0.25 * (dimensions.risk / 10) +
+    0.1 * (dimensions.lifestyle / 10) +
+    0.05 * (dimensions.policy / 10)
+  return Math.round(Math.max(0, Math.min(1, overall0to1)) * 100)
+}
+
+/** Bar weights in the score breakdown UI (matches Your Matches dialog; sum = 1). */
+export const TENANT_RENT_SCORE_BREAKDOWN_WEIGHTS: Record<keyof TenantRentScoreDimensions, number> = {
+  affordability: 0.35,
+  stability: 0.25,
+  risk: 0.2,
+  lifestyle: 0.1,
+  policy: 0.1,
+}
+
+export const TENANT_RENT_SCORE_BREAKDOWN_ROWS: {
+  key: keyof TenantRentScoreDimensions
+  emoji: string
+  label: string
+}[] = [
+  { key: 'affordability', emoji: '💰', label: 'Affordability' },
+  { key: 'stability', emoji: '🏠', label: 'Stability' },
+  { key: 'risk', emoji: '🛡️', label: 'Payment risk' },
+  { key: 'lifestyle', emoji: '✨', label: 'Lifestyle' },
+  { key: 'policy', emoji: '📋', label: 'Space fit' },
+]
+
+export function tenantRentScoreBreakdownContribution(
+  key: keyof TenantRentScoreDimensions,
+  score: number,
+): number {
+  const safe = Number.isFinite(score) ? Math.max(0, Math.min(10, score)) : 0
+  return (safe / 10) * (TENANT_RENT_SCORE_BREAKDOWN_WEIGHTS[key] * 100)
+}
+
+export function tenantRentScoreBreakdownMax(key: keyof TenantRentScoreDimensions): number {
+  return TENANT_RENT_SCORE_BREAKDOWN_WEIGHTS[key] * 100
+}
+
+export function formatTenantRentScoreContribution(value: number): string {
+  const rounded = Math.round(value * 10) / 10
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1)
+}

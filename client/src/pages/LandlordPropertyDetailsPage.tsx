@@ -1,10 +1,23 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { centsToMoneyInput, formatCurrency, moneyInputToCents } from '../lib/propertyDraft'
 import { useAuth } from '../lib/useAuth'
+import { safeInternalPath } from '../lib/safeInternalPath'
 import { supabase } from '../lib/supabase'
 
 type ListingStatus = 'Active' | 'Draft' | 'Inactive' | 'Leased'
+
+const LEASE_TERM_OPTIONS = [
+  '',
+  'Month-to-month',
+  '3 months',
+  '6 months',
+  '12 months',
+  '18 months',
+  '24 months',
+] as const
+
+const LISTING_STATUS_OPTIONS: ListingStatus[] = ['Draft', 'Active', 'Inactive', 'Leased']
 
 type PropertyRecord = {
   id: string
@@ -53,6 +66,15 @@ const DEFAULT_AMENITIES = [
   'Hardwood Floors',
 ]
 
+/** `input type="date"` only accepts YYYY-MM-DD; DB may return ISO timestamps. */
+function toDateInputValue(raw: string | null | undefined): string {
+  if (!raw?.trim()) return ''
+  const t = raw.trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t
+  const m = t.match(/^(\d{4}-\d{2}-\d{2})/)
+  return m?.[1] ?? ''
+}
+
 function InfoPanel({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="rounded-2xl border border-gray-200 bg-white p-5">
@@ -62,14 +84,14 @@ function InfoPanel({ title, children }: { title: string; children: React.ReactNo
   )
 }
 
-function Field({ label, value, className = '' }: { label: string; value: string; className?: string }) {
+function ReadonlyField({ label, value }: { label: string; value: string }) {
   return (
-    <div className={className}>
+    <div>
       <label className="mb-2 block text-sm text-gray-700">{label}</label>
       <input
         readOnly
         value={value}
-        className="w-full rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900"
+        className="w-full rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-900"
       />
     </div>
   )
@@ -77,10 +99,24 @@ function Field({ label, value, className = '' }: { label: string; value: string;
 
 export function LandlordPropertyDetailsPage() {
   const navigate = useNavigate()
+  const location = useLocation()
   const { user } = useAuth()
   const { id = '1' } = useParams()
   const [searchParams] = useSearchParams()
   const isEditMode = searchParams.get('mode') === 'edit'
+
+  const returnToPath = useMemo(
+    () => safeInternalPath((location.state as { from?: string } | null)?.from),
+    [location.state],
+  )
+  const backHref = returnToPath ?? '/properties'
+  const backLabel = useMemo(() => {
+    if (!returnToPath) return 'Back to Properties'
+    if (returnToPath === '/properties' || returnToPath.startsWith('/properties?')) return 'Back to Properties'
+    if (returnToPath.startsWith('/matches')) return 'Back to Matches'
+    return 'Back'
+  }, [returnToPath])
+
   const [property, setProperty] = useState<PropertyRecord | null>(null)
   const [formState, setFormState] = useState({
     title: '',
@@ -106,29 +142,77 @@ export function LandlordPropertyDetailsPage() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const landlordId = user?.id
+
+  const hydrateFromRecord = useCallback((normalized: PropertyRecord) => {
+    setProperty(normalized)
+    setFormState({
+      title: normalized.title || normalized.address_line1,
+      addressLine1: normalized.address_line1,
+      neighborhood: normalized.city,
+      stateCode: normalized.state ?? '',
+      zipCode: normalized.postal_code ?? '',
+      description: normalized.description ?? '',
+      bedrooms: String(normalized.bedrooms),
+      bathrooms: String(normalized.bathrooms),
+      squareFeet: normalized.sqft ? String(normalized.sqft) : '',
+      monthlyRent: centsToMoneyInput(normalized.monthly_rent_cents),
+      securityDeposit: centsToMoneyInput(normalized.deposit_cents),
+      applicationFee: centsToMoneyInput(normalized.application_fee_cents),
+      availableFrom: toDateInputValue(normalized.available_from),
+      leaseTerm: normalized.lease_term ?? '',
+      listingStatus:
+        normalized.status === 'draft'
+          ? 'Draft'
+          : normalized.status === 'inactive'
+            ? 'Inactive'
+            : normalized.status === 'leased'
+              ? 'Leased'
+              : 'Active',
+    })
+    setAmenities(
+      DEFAULT_AMENITIES.map((label) => ({
+        label,
+        enabled: normalized.amenities.includes(label),
+      })),
+    )
+    const labels = normalized.photo_labels.length > 0 ? normalized.photo_labels : ['Main Image']
+    const urls = normalized.photo_urls ?? []
+    setPhotoItems(
+      labels.map((label, i) => ({
+        id: `photo-${i}-${label}`,
+        label,
+        url: urls[i],
+      })),
+    )
+  }, [])
+
   useEffect(() => {
     async function loadProperty() {
-      if (!user) {
+      if (!landlordId) {
         setLoading(false)
+        setProperty(null)
         return
       }
 
+      // Depend on landlordId, not `user`: Supabase replaces the User object on TOKEN_REFRESHED.
+      // Re-running would setLoading(true), unmount the form, and re-hydrate — clicks/edits feel dead.
       setLoading(true)
       setError(null)
 
-      const { data, error } = await supabase
+      const { data, error: fetchError } = await supabase
         .from('properties')
         .select(
           'id, title, address_line1, city, state, postal_code, description, bedrooms, bathrooms, sqft, monthly_rent_cents, deposit_cents, application_fee_cents, available_from, lease_term, status, amenities, photo_labels, photo_urls',
         )
         .eq('id', id)
-        .eq('landlord_id', user.id)
+        .eq('landlord_id', landlordId)
         .maybeSingle()
 
       setLoading(false)
 
-      if (error) {
-        setError(error.message)
+      if (fetchError) {
+        setError(fetchError.message)
         return
       }
 
@@ -144,50 +228,11 @@ export function LandlordPropertyDetailsPage() {
         photo_urls: data.photo_urls ?? [],
       } as PropertyRecord
 
-      setProperty(normalized)
-      setFormState({
-        title: normalized.title || normalized.address_line1,
-        addressLine1: normalized.address_line1,
-        neighborhood: normalized.city,
-        stateCode: normalized.state ?? '',
-        zipCode: normalized.postal_code ?? '',
-        description: normalized.description ?? '',
-        bedrooms: String(normalized.bedrooms),
-        bathrooms: String(normalized.bathrooms),
-        squareFeet: normalized.sqft ? String(normalized.sqft) : '',
-        monthlyRent: centsToMoneyInput(normalized.monthly_rent_cents),
-        securityDeposit: centsToMoneyInput(normalized.deposit_cents),
-        applicationFee: centsToMoneyInput(normalized.application_fee_cents),
-        availableFrom: normalized.available_from ?? '',
-        leaseTerm: normalized.lease_term ?? '',
-        listingStatus:
-          normalized.status === 'draft'
-            ? 'Draft'
-            : normalized.status === 'inactive'
-              ? 'Inactive'
-              : normalized.status === 'leased'
-                ? 'Leased'
-                : 'Active',
-      })
-      setAmenities(
-        DEFAULT_AMENITIES.map((label) => ({
-          label,
-          enabled: normalized.amenities.includes(label),
-        })),
-      )
-      const labels = normalized.photo_labels.length > 0 ? normalized.photo_labels : ['Main Image']
-      const urls = normalized.photo_urls ?? []
-      setPhotoItems(
-        labels.map((label, i) => ({
-          id: `photo-${i}-${label}`,
-          label,
-          url: urls[i],
-        })),
-      )
+      hydrateFromRecord(normalized)
     }
 
     loadProperty()
-  }, [id, user])
+  }, [id, landlordId, hydrateFromRecord])
 
   function updateField<K extends keyof typeof formState>(key: K, value: (typeof formState)[K]) {
     setFormState((current) => ({ ...current, [key]: value }))
@@ -255,13 +300,6 @@ export function LandlordPropertyDetailsPage() {
       photoItemsRef.current.forEach((p) => p.previewUrl && URL.revokeObjectURL(p.previewUrl))
     }
   }, [])
-
-  const displayAddress = useMemo(
-    () => [formState.addressLine1, formState.neighborhood, formState.stateCode, formState.zipCode]
-      .filter(Boolean)
-      .join(', '),
-    [formState.addressLine1, formState.neighborhood, formState.stateCode, formState.zipCode],
-  )
 
   const moveInCost = useMemo(() => {
     const total =
@@ -343,7 +381,25 @@ export function LandlordPropertyDetailsPage() {
       return
     }
 
-    navigate(`/properties/${property.id}`)
+    const { data: refreshed } = await supabase
+      .from('properties')
+      .select(
+        'id, title, address_line1, city, state, postal_code, description, bedrooms, bathrooms, sqft, monthly_rent_cents, deposit_cents, application_fee_cents, available_from, lease_term, status, amenities, photo_labels, photo_urls',
+      )
+      .eq('id', property.id)
+      .eq('landlord_id', user.id)
+      .maybeSingle()
+
+    if (refreshed) {
+      hydrateFromRecord({
+        ...refreshed,
+        amenities: refreshed.amenities ?? [],
+        photo_labels: refreshed.photo_labels ?? [],
+        photo_urls: refreshed.photo_urls ?? [],
+      } as PropertyRecord)
+    }
+
+    navigate({ pathname: `/properties/${property.id}`, search: '' }, { replace: true, state: location.state })
   }
 
   if (loading) {
@@ -361,11 +417,11 @@ export function LandlordPropertyDetailsPage() {
   return (
     <div className="flex min-h-full flex-col py-8">
       <div>
-        <Link to="/properties" className="inline-flex items-center gap-2 text-sm text-gray-600 hover:text-gray-900">
+        <Link to={backHref} className="inline-flex items-center gap-2 text-sm text-gray-600 hover:text-gray-900">
           <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
           </svg>
-          Back to Properties
+          {backLabel}
         </Link>
 
         <div className="mt-3 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -383,7 +439,12 @@ export function LandlordPropertyDetailsPage() {
               <>
                 <button
                   type="button"
-                  onClick={() => navigate(`/properties/${property.id}`)}
+                  onClick={() => {
+                    if (!property) return
+                    hydrateFromRecord(property)
+                    setError(null)
+                    navigate({ pathname: `/properties/${property.id}`, search: '' }, { replace: true, state: location.state })
+                  }}
                   className="inline-flex min-w-[96px] items-center justify-center rounded-lg border border-gray-200 bg-white px-5 py-3 text-sm font-medium text-gray-700 hover:bg-gray-50"
                 >
                   Cancel
@@ -398,7 +459,8 @@ export function LandlordPropertyDetailsPage() {
               </>
             ) : (
               <Link
-                to={`/properties/${property.id}?mode=edit`}
+                to={{ pathname: `/properties/${property.id}`, search: '?mode=edit' }}
+                state={location.state}
                 className="inline-flex min-w-[108px] items-center justify-center rounded-lg bg-gray-900 px-5 py-3 text-sm font-medium text-white hover:bg-gray-800"
               >
                 Edit Property
@@ -410,144 +472,104 @@ export function LandlordPropertyDetailsPage() {
 
       <div className="mt-7 grid gap-5 xl:grid-cols-[minmax(0,1fr)_260px]">
         <div className="space-y-5">
-          {!isEditMode ? (
-            <InfoPanel title="Property Overview">
-              <div className="grid gap-5 lg:grid-cols-[240px_minmax(0,1fr)]">
-                <div className="flex aspect-[16/9] items-center justify-center overflow-hidden rounded-xl bg-gray-300">
-                  {(property?.photo_urls?.[0] || photoItems[0]?.url || photoItems[0]?.previewUrl) ? (
-                    <img
-                      src={property.photo_urls?.[0] || photoItems[0]?.url || photoItems[0]?.previewUrl}
-                      alt={property?.title || 'Property'}
-                      className="h-full w-full object-cover"
-                    />
-                  ) : (
-                    <span className="text-sm text-white/90">{photoItems[0]?.label || 'Main Property image'}</span>
-                  )}
-                </div>
-
-                <div className="space-y-4">
-                  <div>
-                    <p className="text-sm text-gray-500">Property Name</p>
-                    <p className="mt-1 text-[1.15rem] font-medium text-gray-900">
-                      {property.title || property.address_line1}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-sm text-gray-500">Address</p>
-                    <p className="mt-1 text-sm text-gray-900">{displayAddress}</p>
-                  </div>
-                  <div>
-                    <p className="text-sm text-gray-500">Previous Status</p>
-                    <p className="mt-1 text-sm text-gray-900">{formState.listingStatus}</p>
-                  </div>
-                </div>
-              </div>
-            </InfoPanel>
-          ) : null}
-
           <InfoPanel title="Basic Information">
             <div className="space-y-4">
-              {isEditMode ? (
-                <>
-                  <div>
-                    <label className="mb-2 block text-sm text-gray-700">Property Name</label>
-                    <input
-                      value={formState.title}
-                      onChange={(e) => updateField('title', e.target.value)}
-                      className="w-full rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900"
-                    />
-                  </div>
-                  <div>
-                    <label className="mb-2 block text-sm text-gray-700">Address</label>
-                    <input
-                      value={formState.addressLine1}
-                      onChange={(e) => updateField('addressLine1', e.target.value)}
-                      className="w-full rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900"
-                    />
-                  </div>
-
-                  <div className="grid gap-3 sm:grid-cols-3">
-                    <input
-                      value={formState.neighborhood}
-                      onChange={(e) => updateField('neighborhood', e.target.value)}
-                      className="w-full rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900"
-                    />
-                    <input
-                      value={formState.stateCode}
-                      onChange={(e) => updateField('stateCode', e.target.value)}
-                      className="w-full rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900"
-                    />
-                    <input
-                      value={formState.zipCode}
-                      onChange={(e) => updateField('zipCode', e.target.value)}
-                      className="w-full rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900"
-                    />
-                  </div>
-                </>
-              ) : (
-                <>
-                  <Field label="Property Name" value={property.title || property.address_line1} />
-                  <Field label="Address" value={property.address_line1} />
-                  <div className="grid gap-3 sm:grid-cols-3">
-                    <Field label="" value={property.city} />
-                    <Field label="" value={property.state ?? ''} />
-                    <Field label="" value={property.postal_code ?? ''} />
-                  </div>
-                </>
-              )}
-
               <div>
-                <label className="mb-2 block text-sm text-gray-700">Description</label>
-                {isEditMode ? (
-                  <textarea
-                    value={formState.description}
-                    onChange={(e) => updateField('description', e.target.value)}
-                    className="min-h-[124px] w-full rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm leading-7 text-gray-900"
-                  />
-                ) : (
-                  <textarea
-                    readOnly
-                    value={property.description ?? ''}
-                    className="min-h-[124px] w-full rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm leading-7 text-gray-900"
-                  />
-                )}
+                <label className="mb-2 block text-sm text-gray-700">Property Name</label>
+                <input
+                  readOnly={!isEditMode}
+                  value={formState.title}
+                  onChange={(e) => updateField('title', e.target.value)}
+                  className={`w-full rounded-lg border border-gray-200 px-4 py-3 text-sm text-gray-900 ${
+                    isEditMode ? 'bg-white' : 'bg-gray-50'
+                  }`}
+                />
+              </div>
+              <div>
+                <label className="mb-2 block text-sm text-gray-700">Address</label>
+                <input
+                  readOnly={!isEditMode}
+                  value={formState.addressLine1}
+                  onChange={(e) => updateField('addressLine1', e.target.value)}
+                  className={`w-full rounded-lg border border-gray-200 px-4 py-3 text-sm text-gray-900 ${
+                    isEditMode ? 'bg-white' : 'bg-gray-50'
+                  }`}
+                />
               </div>
 
               <div className="grid gap-3 sm:grid-cols-3">
-                {isEditMode ? (
-                  <>
-                    <div>
-                      <label className="mb-2 block text-sm text-gray-700">Bedrooms</label>
-                      <input
-                        value={formState.bedrooms}
-                        onChange={(e) => updateField('bedrooms', e.target.value)}
-                        className="w-full rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900"
-                      />
-                    </div>
-                    <div>
-                      <label className="mb-2 block text-sm text-gray-700">Bathrooms</label>
-                      <input
-                        value={formState.bathrooms}
-                        onChange={(e) => updateField('bathrooms', e.target.value)}
-                        className="w-full rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900"
-                      />
-                    </div>
-                    <div>
-                      <label className="mb-2 block text-sm text-gray-700">Square Feet</label>
-                      <input
-                        value={formState.squareFeet}
-                        onChange={(e) => updateField('squareFeet', e.target.value)}
-                        className="w-full rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900"
-                      />
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <Field label="Bedrooms" value={String(property.bedrooms)} />
-                    <Field label="Bathrooms" value={String(property.bathrooms)} />
-                    <Field label="Square Feet" value={property.sqft ? String(property.sqft) : ''} />
-                  </>
-                )}
+                <input
+                  readOnly={!isEditMode}
+                  value={formState.neighborhood}
+                  onChange={(e) => updateField('neighborhood', e.target.value)}
+                  className={`w-full rounded-lg border border-gray-200 px-4 py-3 text-sm text-gray-900 ${
+                    isEditMode ? 'bg-white' : 'bg-gray-50'
+                  }`}
+                />
+                <input
+                  readOnly={!isEditMode}
+                  value={formState.stateCode}
+                  onChange={(e) => updateField('stateCode', e.target.value)}
+                  className={`w-full rounded-lg border border-gray-200 px-4 py-3 text-sm text-gray-900 ${
+                    isEditMode ? 'bg-white' : 'bg-gray-50'
+                  }`}
+                />
+                <input
+                  readOnly={!isEditMode}
+                  value={formState.zipCode}
+                  onChange={(e) => updateField('zipCode', e.target.value)}
+                  className={`w-full rounded-lg border border-gray-200 px-4 py-3 text-sm text-gray-900 ${
+                    isEditMode ? 'bg-white' : 'bg-gray-50'
+                  }`}
+                />
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm text-gray-700">Description</label>
+                <textarea
+                  readOnly={!isEditMode}
+                  value={formState.description}
+                  onChange={(e) => updateField('description', e.target.value)}
+                  className={`min-h-[124px] w-full rounded-lg border border-gray-200 px-4 py-3 text-sm leading-7 text-gray-900 ${
+                    isEditMode ? 'bg-white' : 'bg-gray-50'
+                  }`}
+                />
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-3">
+                <div>
+                  <label className="mb-2 block text-sm text-gray-700">Bedrooms</label>
+                  <input
+                    readOnly={!isEditMode}
+                    value={formState.bedrooms}
+                    onChange={(e) => updateField('bedrooms', e.target.value)}
+                    className={`w-full rounded-lg border border-gray-200 px-4 py-3 text-sm text-gray-900 ${
+                      isEditMode ? 'bg-white' : 'bg-gray-50'
+                    }`}
+                  />
+                </div>
+                <div>
+                  <label className="mb-2 block text-sm text-gray-700">Bathrooms</label>
+                  <input
+                    readOnly={!isEditMode}
+                    value={formState.bathrooms}
+                    onChange={(e) => updateField('bathrooms', e.target.value)}
+                    className={`w-full rounded-lg border border-gray-200 px-4 py-3 text-sm text-gray-900 ${
+                      isEditMode ? 'bg-white' : 'bg-gray-50'
+                    }`}
+                  />
+                </div>
+                <div>
+                  <label className="mb-2 block text-sm text-gray-700">Square Feet</label>
+                  <input
+                    readOnly={!isEditMode}
+                    value={formState.squareFeet}
+                    onChange={(e) => updateField('squareFeet', e.target.value)}
+                    className={`w-full rounded-lg border border-gray-200 px-4 py-3 text-sm text-gray-900 ${
+                      isEditMode ? 'bg-white' : 'bg-gray-50'
+                    }`}
+                  />
+                </div>
               </div>
             </div>
           </InfoPanel>
@@ -559,9 +581,8 @@ export function LandlordPropertyDetailsPage() {
                   <input
                     type="checkbox"
                     checked={amenity.enabled}
-                    onChange={() => (isEditMode ? toggleAmenity(amenity.label) : undefined)}
                     disabled={!isEditMode}
-                    readOnly={!isEditMode}
+                    onChange={() => (isEditMode ? toggleAmenity(amenity.label) : undefined)}
                     className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-200"
                   />
                   <span>{amenity.label}</span>
@@ -571,40 +592,45 @@ export function LandlordPropertyDetailsPage() {
           </InfoPanel>
 
           <InfoPanel title={isEditMode ? 'Property Images' : 'Property Photos'}>
-            {isEditMode ? (
-              <>
+            <div
+              role="button"
+              tabIndex={0}
+              onDrop={handleDrop}
+              onDragOver={handleDragOver}
+              onClick={() => (isEditMode ? fileInputRef.current?.click() : undefined)}
+              onKeyDown={(e) => (isEditMode && e.key === 'Enter' ? fileInputRef.current?.click() : undefined)}
+              className={`mb-4 rounded-xl border border-dashed border-gray-300 py-8 text-center transition-colors ${
+                isEditMode ? 'cursor-pointer bg-gray-50 hover:border-gray-400 hover:bg-gray-100' : 'bg-gray-50'
+              }`}
+            >
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".jpg,.jpeg,.png,.heic,image/jpeg,image/png,image/heic"
+                multiple
+                className="hidden"
+                disabled={!isEditMode}
+                onChange={(e) => {
+                  processFiles(e.target.files)
+                  e.target.value = ''
+                }}
+              />
+              <svg className="mx-auto h-10 w-10 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+              </svg>
+              <p className="mt-2 text-sm font-medium text-gray-700">
+                {isEditMode ? 'Drag and drop photos or click to browse' : 'Photos'}
+              </p>
+              {isEditMode ? <p className="mt-1 text-xs text-gray-500">JPG, PNG, HEIC (max 10MB each)</p> : null}
+            </div>
+            <div className="grid gap-3 sm:grid-cols-3">
+              {photoItems.map((item, index) => (
                 <div
-                  role="button"
-                  tabIndex={0}
-                  onDrop={handleDrop}
-                  onDragOver={handleDragOver}
-                  onClick={() => fileInputRef.current?.click()}
-                  onKeyDown={(e) => e.key === 'Enter' && fileInputRef.current?.click()}
-                  className="mb-4 cursor-pointer rounded-xl border border-dashed border-gray-300 bg-gray-50 py-8 text-center transition-colors hover:border-gray-400 hover:bg-gray-100"
+                  key={item.id}
+                  className="relative flex aspect-[5/3] items-center justify-center overflow-hidden rounded-xl bg-gray-300"
                 >
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept=".jpg,.jpeg,.png,.heic,image/jpeg,image/png,image/heic"
-                    multiple
-                    className="hidden"
-                    onChange={(e) => {
-                      processFiles(e.target.files)
-                      e.target.value = ''
-                    }}
-                  />
-                  <svg className="mx-auto h-10 w-10 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                  </svg>
-                  <p className="mt-2 text-sm font-medium text-gray-700">Drag and drop photos or click to browse</p>
-                  <p className="mt-1 text-xs text-gray-500">JPG, PNG, HEIC (max 10MB each)</p>
-                </div>
-                <div className="grid gap-3 sm:grid-cols-3">
-                  {photoItems.map((item, index) => (
-                    <div
-                      key={item.id}
-                      className="relative flex aspect-[5/3] items-center justify-center overflow-hidden rounded-xl bg-gray-300"
-                    >
+                  {isEditMode ? (
+                    <>
                       <button
                         type="button"
                         onClick={() => makeCover(index)}
@@ -624,87 +650,62 @@ export function LandlordPropertyDetailsPage() {
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                         </svg>
                       </button>
-                      {(item.url || item.previewUrl) ? (
-                        <img
-                          src={item.url || item.previewUrl}
-                          alt={item.label}
-                          className="h-full w-full object-cover"
-                        />
-                      ) : (
-                        <span className="text-xs text-white/90">{item.label}</span>
-                      )}
-                    </div>
-                  ))}
+                    </>
+                  ) : null}
+                  {(item.url || item.previewUrl) ? (
+                    <img
+                      src={item.url || item.previewUrl}
+                      alt={item.label}
+                      className="h-full w-full object-cover"
+                    />
+                  ) : (
+                    <span className="text-xs text-white/90">{item.label}</span>
+                  )}
                 </div>
-                <p className="mt-4 text-sm text-gray-500">
-                  Upload at least 5 high-quality images. First image will be the primary photo.
-                </p>
-              </>
-            ) : (
-              <>
-                <div className="grid gap-3 sm:grid-cols-4">
-                  {photoItems.map((item, index) => (
-                    <div
-                      key={item.id}
-                      className="flex aspect-[5/3] items-center justify-center overflow-hidden rounded-xl bg-gray-300"
-                    >
-                      {(item.url || item.previewUrl) ? (
-                        <img
-                          src={item.url || item.previewUrl}
-                          alt={item.label}
-                          className="h-full w-full object-cover"
-                        />
-                      ) : (
-                        <span className="text-xs text-white/90">{item.label}</span>
-                      )}
-                    </div>
-                  ))}
-                </div>
-                <p className="mt-4 text-sm text-gray-500">
-                  Minimum 5 photos required. Current: {photoItems.length} photos
-                </p>
-              </>
-            )}
+              ))}
+            </div>
+            <p className="mt-4 text-sm text-gray-500">
+              Upload at least 5 high-quality images. First image will be the primary photo.
+            </p>
           </InfoPanel>
         </div>
 
         <div className="space-y-5">
           <InfoPanel title="Pricing">
             <div className="space-y-4">
-              {isEditMode ? (
-                <>
-                  <div>
-                    <label className="mb-2 block text-sm text-gray-700">Monthly Rent</label>
-                    <input
-                      value={formState.monthlyRent}
-                      onChange={(e) => updateField('monthlyRent', e.target.value)}
-                      className="w-full rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900"
-                    />
-                  </div>
-                  <div>
-                    <label className="mb-2 block text-sm text-gray-700">Security Deposit</label>
-                    <input
-                      value={formState.securityDeposit}
-                      onChange={(e) => updateField('securityDeposit', e.target.value)}
-                      className="w-full rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900"
-                    />
-                  </div>
-                  <div>
-                    <label className="mb-2 block text-sm text-gray-700">Application Fee</label>
-                    <input
-                      value={formState.applicationFee}
-                      onChange={(e) => updateField('applicationFee', e.target.value)}
-                      className="w-full rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900"
-                    />
-                  </div>
-                </>
-              ) : (
-                <>
-                  <Field label="Monthly Rent" value={formatCurrency(property.monthly_rent_cents)} />
-                  <Field label="Security Deposit" value={formatCurrency(property.deposit_cents)} />
-                  <Field label="Application Fee" value={formatCurrency(property.application_fee_cents)} />
-                </>
-              )}
+              <div>
+                <label className="mb-2 block text-sm text-gray-700">Monthly Rent</label>
+                <input
+                  readOnly={!isEditMode}
+                  value={formState.monthlyRent}
+                  onChange={(e) => updateField('monthlyRent', e.target.value)}
+                  className={`w-full rounded-lg border border-gray-200 px-4 py-3 text-sm text-gray-900 ${
+                    isEditMode ? 'bg-white' : 'bg-gray-50'
+                  }`}
+                />
+              </div>
+              <div>
+                <label className="mb-2 block text-sm text-gray-700">Security Deposit</label>
+                <input
+                  readOnly={!isEditMode}
+                  value={formState.securityDeposit}
+                  onChange={(e) => updateField('securityDeposit', e.target.value)}
+                  className={`w-full rounded-lg border border-gray-200 px-4 py-3 text-sm text-gray-900 ${
+                    isEditMode ? 'bg-white' : 'bg-gray-50'
+                  }`}
+                />
+              </div>
+              <div>
+                <label className="mb-2 block text-sm text-gray-700">Application Fee</label>
+                <input
+                  readOnly={!isEditMode}
+                  value={formState.applicationFee}
+                  onChange={(e) => updateField('applicationFee', e.target.value)}
+                  className={`w-full rounded-lg border border-gray-200 px-4 py-3 text-sm text-gray-900 ${
+                    isEditMode ? 'bg-white' : 'bg-gray-50'
+                  }`}
+                />
+              </div>
 
               <div className="flex items-center justify-between border-t border-gray-200 pt-4 text-sm">
                 <span className="text-gray-500">Move-in Cost</span>
@@ -716,47 +717,42 @@ export function LandlordPropertyDetailsPage() {
           <InfoPanel title="Availability">
             <div className="space-y-4">
               <div>
-                <label className="mb-2 block text-sm text-gray-700">Available From</label>
-                <div className="relative">
-                  {isEditMode ? (
-                    <input
-                      value={formState.availableFrom}
-                      onChange={(e) => updateField('availableFrom', e.target.value)}
-                      className="w-full rounded-lg border border-gray-200 bg-white px-4 py-3 pr-10 text-sm text-gray-900"
-                    />
-                  ) : (
-                    <input
-                      readOnly
-                      value={property.available_from ?? ''}
-                      className="w-full rounded-lg border border-gray-200 bg-white px-4 py-3 pr-10 text-sm text-gray-900"
-                    />
-                  )}
-                  <svg className="absolute right-4 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10m-11 9h12a2 2 0 002-2V7a2 2 0 00-2-2H6a2 2 0 00-2 2v11a2 2 0 002 2z" />
-                  </svg>
-                </div>
+                <label className="mb-2 block text-sm text-gray-700" htmlFor="property-available-from">
+                  Available From
+                </label>
+                {isEditMode ? (
+                  <input
+                    id="property-available-from"
+                    type="date"
+                    value={formState.availableFrom}
+                    onChange={(e) => updateField('availableFrom', e.target.value)}
+                    className="w-full rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900"
+                  />
+                ) : (
+                  <ReadonlyField label="" value={formState.availableFrom} />
+                )}
               </div>
 
               <div>
-                <label className="mb-2 block text-sm text-gray-700">Lease Term</label>
-                <div className="relative">
-                  {isEditMode ? (
-                    <input
-                      value={formState.leaseTerm}
-                      onChange={(e) => updateField('leaseTerm', e.target.value)}
-                      className="w-full rounded-lg border border-gray-200 bg-white px-4 py-3 pr-10 text-sm text-gray-900"
-                    />
-                  ) : (
-                    <input
-                      readOnly
-                      value={property.lease_term ?? ''}
-                      className="w-full rounded-lg border border-gray-200 bg-white px-4 py-3 pr-10 text-sm text-gray-900"
-                    />
-                  )}
-                  <svg className="absolute right-4 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                  </svg>
-                </div>
+                <label className="mb-2 block text-sm text-gray-700" htmlFor="property-lease-term">
+                  Lease Term
+                </label>
+                {isEditMode ? (
+                  <select
+                    id="property-lease-term"
+                    value={formState.leaseTerm}
+                    onChange={(e) => updateField('leaseTerm', e.target.value)}
+                    className="w-full appearance-none rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900"
+                  >
+                    {LEASE_TERM_OPTIONS.map((opt) => (
+                      <option key={opt || '__empty'} value={opt}>
+                        {opt || 'Select a lease term'}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <ReadonlyField label="" value={formState.leaseTerm} />
+                )}
               </div>
             </div>
           </InfoPanel>
@@ -764,25 +760,25 @@ export function LandlordPropertyDetailsPage() {
           <InfoPanel title="Status">
             <div className="space-y-4">
               <div>
-                <label className="mb-2 block text-sm text-gray-700">Listing Status</label>
-                <div className="relative">
-                  {isEditMode ? (
-                    <input
-                      value={formState.listingStatus}
-                      onChange={(e) => updateField('listingStatus', e.target.value as ListingStatus)}
-                      className="w-full rounded-lg border border-gray-200 bg-white px-4 py-3 pr-10 text-sm text-gray-900"
-                    />
-                  ) : (
-                    <input
-                      readOnly
-                      value={formState.listingStatus}
-                      className="w-full rounded-lg border border-gray-200 bg-white px-4 py-3 pr-10 text-sm text-gray-900"
-                    />
-                  )}
-                  <svg className="absolute right-4 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                  </svg>
-                </div>
+                <label className="mb-2 block text-sm text-gray-700" htmlFor="property-listing-status">
+                  Listing Status
+                </label>
+                {isEditMode ? (
+                  <select
+                    id="property-listing-status"
+                    value={formState.listingStatus}
+                    onChange={(e) => updateField('listingStatus', e.target.value as ListingStatus)}
+                    className="w-full appearance-none rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900"
+                  >
+                    {LISTING_STATUS_OPTIONS.map((opt) => (
+                      <option key={opt} value={opt}>
+                        {opt}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <ReadonlyField label="" value={formState.listingStatus} />
+                )}
               </div>
 
               <div className="rounded-xl bg-gray-50 px-4 py-4">
