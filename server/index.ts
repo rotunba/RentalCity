@@ -18,9 +18,39 @@ const PORT = process.env.PORT || 3001
 
 const supabaseUrl = process.env.VITE_SUPABASE_URL
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+const backgroundChecksEnv = process.env.BACKGROUNDCHECKS_ENV || 'sandbox'
+const backgroundChecksApiToken =
+  backgroundChecksEnv === 'production'
+    ? process.env.BACKGROUNDCHECKS_API_TOKEN_PROD
+    : process.env.BACKGROUNDCHECKS_API_TOKEN_SANDBOX
 
 app.use(cors({ origin: true }))
 app.use(express.json())
+
+function backgroundChecksBaseUrl() {
+  return backgroundChecksEnv === 'production' ? 'https://app.backgroundchecks.com/api' : 'https://sandbox.backgroundchecks.com/api'
+}
+
+async function backgroundChecksFetch(path: string, init?: RequestInit) {
+  if (!backgroundChecksApiToken) {
+    throw new Error('Missing BackgroundChecks.com api token')
+  }
+  const url = new URL(backgroundChecksBaseUrl() + path)
+  url.searchParams.set('api_token', backgroundChecksApiToken)
+  const res = await fetch(url.toString(), {
+    ...init,
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      ...(init?.headers ?? {}),
+    },
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`BackgroundChecks.com error (${res.status}): ${text || res.statusText}`)
+  }
+  return res
+}
 
 function getSupabaseAdmin() {
   if (!supabaseUrl || !supabaseServiceKey) return null
@@ -286,6 +316,230 @@ async function landlordMayReadTenantUniversalViaCatalog(
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true })
+})
+
+/**
+ * Tenant-only: load landlord profile for a listing the tenant can see.
+ * This avoids client-side RLS edge cases while still enforcing access rules.
+ */
+app.get('/api/tenant/landlord-profile', async (req, res) => {
+  const admin = getSupabaseAdmin()
+  if (!admin) return res.status(500).json({ error: 'Server configuration error' })
+  const token = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null
+  const user = await authUser(token)
+  if (!user) return res.status(401).json({ error: 'Authentication required' })
+
+  const propertyId = typeof req.query.propertyId === 'string' ? req.query.propertyId : null
+  const landlordId = typeof req.query.landlordId === 'string' ? req.query.landlordId : null
+  if (!propertyId && !landlordId) return res.status(400).json({ error: 'Missing propertyId or landlordId' })
+  if (propertyId && !UUID_PARAM_RE.test(propertyId)) return res.status(400).json({ error: 'Invalid propertyId' })
+  if (landlordId && !UUID_PARAM_RE.test(landlordId)) return res.status(400).json({ error: 'Invalid landlordId' })
+
+  let resolvedLandlordId = landlordId
+  if (!resolvedLandlordId && propertyId) {
+    const { data: prop } = await admin.from('properties').select('id, landlord_id, status').eq('id', propertyId).maybeSingle()
+    const p = prop as { landlord_id?: string; status?: string } | null
+    if (!p?.landlord_id) return res.status(404).json({ error: 'Property not found' })
+
+    // Enforce access: tenant can view landlord profile if the listing is active OR the tenant is in invited guest mode for that landlord.
+    const nowIso = new Date().toISOString()
+    const { data: invite } = await admin
+      .from('tenant_invite_restrictions')
+      .select('landlord_id, ends_at')
+      .eq('tenant_id', user.id)
+      .gt('ends_at', nowIso)
+      .maybeSingle()
+    const inviteLandlordId = (invite as { landlord_id?: string } | null)?.landlord_id ?? null
+
+    const status = String(p.status ?? '').toLowerCase()
+    const isActive = status === 'active'
+    const invitedForThisLandlord = inviteLandlordId != null && inviteLandlordId === p.landlord_id
+    if (!isActive && !invitedForThisLandlord) {
+      return res.status(403).json({ error: 'Forbidden' })
+    }
+
+    resolvedLandlordId = p.landlord_id
+  }
+
+  if (!resolvedLandlordId) return res.status(400).json({ error: 'Could not resolve landlordId' })
+
+  const { data: profile } = await admin
+    .from('profiles')
+    .select('display_name, avatar_url, phone, bio, city, created_at')
+    .eq('id', resolvedLandlordId)
+    .maybeSingle()
+
+  if (!profile) return res.status(404).json({ error: 'Landlord not found' })
+  return res.json({ profile })
+})
+
+/**
+ * Start (or reuse) a BackgroundChecks.com order for the tenant's latest universal application window.
+ * Returns the report_key (used by the applicant form widget).
+ */
+app.post('/api/background-checks/universal/start', async (req, res) => {
+  const admin = getSupabaseAdmin()
+  if (!admin) return res.status(500).json({ error: 'Server configuration error' })
+  const token = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null
+  const user = await authUser(token)
+  if (!user) return res.status(401).json({ error: 'Authentication required' })
+
+  const { universalApplicationId } = req.body as { universalApplicationId?: string }
+  if (!universalApplicationId || !UUID_PARAM_RE.test(universalApplicationId)) {
+    return res.status(400).json({ error: 'Invalid universalApplicationId' })
+  }
+
+  // Confirm this universal application belongs to the tenant.
+  const { data: ua } = await admin
+    .from('universal_applications')
+    .select('id, tenant_id, status, valid_until')
+    .eq('id', universalApplicationId)
+    .maybeSingle()
+  if (!ua || (ua as { tenant_id?: string }).tenant_id !== user.id) {
+    return res.status(403).json({ error: 'Forbidden' })
+  }
+
+  // Reuse existing screening if present.
+  const { data: existing } = await admin
+    .from('universal_application_screenings')
+    .select('id, report_key, applicant_invite_url, report_status, background_pass, income_pass')
+    .eq('tenant_id', user.id)
+    .eq('universal_application_id', universalApplicationId)
+    .maybeSingle()
+  const ex = existing as { report_key?: string; applicant_invite_url?: string } | null
+  if (ex?.report_key) {
+    return res.json({ reportKey: ex.report_key, inviteUrl: ex.applicant_invite_url ?? null })
+  }
+
+  // Place an order for the tenant (one applicant). Use placeholder report_sku until configured.
+  const applicantEmail = user.email ?? ''
+  if (!applicantEmail) return res.status(400).json({ error: 'Missing tenant email' })
+
+  const reportSku = (process.env.BACKGROUNDCHECKS_REPORT_SKU || 'HIRE3') as 'HIRE1' | 'HIRE2' | 'HIRE3'
+  const orderBody = {
+    report_sku: reportSku,
+    order_quantity: 1,
+    applicant_emails: [applicantEmail],
+    employment: 'Y', // used as income/employment verification signal
+    terms_agree: 'Y',
+  }
+
+  try {
+    const bcRes = await backgroundChecksFetch('/orders', { method: 'POST', body: JSON.stringify(orderBody) })
+    const json = (await bcRes.json()) as {
+      applicants?: Array<{ report_key?: string; applicant_invite_url?: string; applicant_email?: string }>
+    }
+    const first = json.applicants?.[0]
+    const reportKey = first?.report_key
+    if (!reportKey) return res.status(500).json({ error: 'BackgroundChecks.com did not return a report_key' })
+
+    await admin.from('universal_application_screenings').insert({
+      tenant_id: user.id,
+      universal_application_id: universalApplicationId,
+      provider: 'backgroundchecks_com',
+      environment: backgroundChecksEnv === 'production' ? 'production' : 'sandbox',
+      report_sku: reportSku,
+      applicant_email: first?.applicant_email ?? applicantEmail,
+      report_key: reportKey,
+      applicant_invite_url: first?.applicant_invite_url ?? null,
+      report_status: 'A',
+      background_status: 'P',
+      employment_status: 'P',
+      background_pass: null,
+      income_pass: null,
+    })
+
+    return res.json({ reportKey, inviteUrl: first?.applicant_invite_url ?? null })
+  } catch (e) {
+    return res.status(502).json({ error: (e as Error).message })
+  }
+})
+
+/**
+ * Refresh provider status for a report_key and update our summary fields.
+ * Allowed for the tenant who owns it, or a landlord allowed to read that tenant's universal application.
+ */
+app.post('/api/background-checks/report/refresh', async (req, res) => {
+  const admin = getSupabaseAdmin()
+  if (!admin) return res.status(500).json({ error: 'Server configuration error' })
+  const token = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null
+  const user = await authUser(token)
+  if (!user) return res.status(401).json({ error: 'Authentication required' })
+
+  const { reportKey } = req.body as { reportKey?: string }
+  if (!reportKey || typeof reportKey !== 'string') return res.status(400).json({ error: 'Invalid reportKey' })
+
+  const { data: row } = await admin
+    .from('universal_application_screenings')
+    .select('id, tenant_id, report_key')
+    .eq('report_key', reportKey)
+    .maybeSingle()
+  const screening = row as { id: string; tenant_id: string; report_key: string } | null
+  if (!screening) return res.status(404).json({ error: 'Not found' })
+
+  const isTenant = screening.tenant_id === user.id
+  let allowed = isTenant
+  if (!allowed) {
+    allowed = await landlordMayReadTenantUniversalViaDb(admin, user.id, screening.tenant_id)
+  }
+  if (!allowed) return res.status(403).json({ error: 'Forbidden' })
+
+  try {
+    const statusRes = await backgroundChecksFetch(`/reports/${encodeURIComponent(reportKey)}/status`, { method: 'GET' })
+    const statusJson = (await statusRes.json()) as {
+      report_status?: string
+      background_status?: string
+      employment_status?: string
+      status?: string
+    }
+
+    // When complete, fetch report details and derive very simple pass/fail signals:
+    // - background_pass: true if complete and no criminal record arrays present
+    // - income_pass: true if employment section exists and status is complete
+    let backgroundPass: boolean | null = null
+    let incomePass: boolean | null = null
+    let completedAt: string | null = null
+
+    const reportStatus = statusJson.report_status ?? statusJson.status ?? null
+    const backgroundStatus = statusJson.background_status ?? null
+    const employmentStatus = statusJson.employment_status ?? null
+
+    if (reportStatus === 'C') {
+      const reportRes = await backgroundChecksFetch(`/report/${encodeURIComponent(reportKey)}`, { method: 'GET' })
+      const report = (await reportRes.json()) as any
+      const hasCriminal =
+        (report?.criminal_records?.records?.length ?? 0) > 0 ||
+        (report?.county_criminal?.county_records?.length ?? 0) > 0 ||
+        (report?.federal_criminal?.cases?.length ?? 0) > 0 ||
+        (report?.blj?.cases?.length ?? 0) > 0
+      backgroundPass = !hasCriminal
+      incomePass = report?.employment?.status ? report.employment.status === 'C' : employmentStatus ? employmentStatus === 'C' : null
+      completedAt = new Date().toISOString()
+    }
+
+    await admin
+      .from('universal_application_screenings')
+      .update({
+        report_status: reportStatus,
+        background_status: backgroundStatus,
+        employment_status: employmentStatus,
+        background_pass: backgroundPass,
+        income_pass: incomePass,
+        completed_at: completedAt,
+      })
+      .eq('report_key', reportKey)
+
+    return res.json({
+      ok: true,
+      reportStatus,
+      backgroundStatus,
+      employmentStatus,
+      backgroundPass,
+      incomePass,
+    })
+  } catch (e) {
+    return res.status(502).json({ error: (e as Error).message })
+  }
 })
 
 app.post('/api/account/delete', async (req, res) => {

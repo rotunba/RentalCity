@@ -122,6 +122,12 @@ export function LandlordTenantProfilePage() {
   } | null>(null)
   const [reviewEditOpen, setReviewEditOpen] = useState(false)
   const [tenantUniversalApplication, setTenantUniversalApplication] = useState<UniversalApplicationRecord | null>(null)
+  const [tenantScreening, setTenantScreening] = useState<{
+    report_status: string | null
+    background_pass: boolean | null
+    income_pass: boolean | null
+    created_at: string
+  } | null>(null)
   type LandlordTenantApplicationRow = {
     id: string
     status: string
@@ -383,6 +389,15 @@ export function LandlordTenantProfilePage() {
       }
       setTenantUniversalApplication(ua)
 
+      const { data: screeningRow } = await supabase
+        .from('universal_application_screenings')
+        .select('report_status, background_pass, income_pass, created_at')
+        .eq('tenant_id', id)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+      setTenantScreening((screeningRow as any) ?? null)
+
       const rows = (applicationsData ?? []) as LandlordTenantApplicationRow[]
       const forLandlord = rows.filter((r) => r.property?.landlord_id === user.id)
       setLandlordTenantApplications(forLandlord)
@@ -475,7 +490,7 @@ export function LandlordTenantProfilePage() {
     }
 
     loadTenantContext()
-  }, [id, user, propertyParam, applicationParam])
+  }, [id, user?.id, propertyParam, applicationParam])
 
   async function handleAccept() {
     if (!pendingApplicationId || !applicationPropertyId || !user) return
@@ -842,6 +857,21 @@ export function LandlordTenantProfilePage() {
                     isUniversalActive={tenantUniversalDisplay.isUniversalActive}
                     showTimeline={false}
                   />
+
+                  <div className="mt-4 grid gap-2 rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-gray-600">Income</span>
+                      <span className="font-medium text-gray-900">
+                        {tenantScreening?.income_pass == null ? '—' : tenantScreening.income_pass ? 'Pass' : 'Fail'}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-gray-600">Background</span>
+                      <span className="font-medium text-gray-900">
+                        {tenantScreening?.background_pass == null ? '—' : tenantScreening.background_pass ? 'Pass' : 'Fail'}
+                      </span>
+                    </div>
+                  </div>
                 </ProfileContentCard>
 
                 <VerificationStatusCard />

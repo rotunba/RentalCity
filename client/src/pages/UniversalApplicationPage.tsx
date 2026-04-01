@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
+import { startUniversalBackgroundCheck } from '../lib/backgroundChecksApi'
 import { useAuth } from '../lib/useAuth'
 import { supabase } from '../lib/supabase'
 
@@ -90,14 +91,28 @@ export function UniversalApplicationPage() {
         .eq('status', 'active')
 
       const validUntilIso = validUntil.toISOString()
-      const { error: insertError } = await supabase.from('universal_applications').insert({
+      const { data: inserted, error: insertError } = await supabase
+        .from('universal_applications')
+        .insert({
         tenant_id: user.id,
         status: 'active',
         valid_until: validUntilIso,
       })
+        .select('id')
+        .maybeSingle()
 
       if (insertError) {
         throw insertError
+      }
+
+      const universalApplicationId = (inserted as { id?: string } | null)?.id
+      if (universalApplicationId) {
+        const { data: session } = await supabase.auth.getSession()
+        const accessToken = session.session?.access_token
+        if (accessToken) {
+          // Fire-and-forget: create/reuse screening row for this application window.
+          startUniversalBackgroundCheck(accessToken, universalApplicationId).catch(() => {})
+        }
       }
 
       navigate('/account/rental-application', { replace: true })

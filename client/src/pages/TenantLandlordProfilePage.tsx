@@ -1,5 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
+import { computeLandlordResponseRate, type LandlordResponseRateResult } from '../lib/landlordResponseRate'
+import { fetchTenantLandlordProfile } from '../lib/landlordProfileApi'
 import { safeInternalPath } from '../lib/safeInternalPath'
 import { supabase } from '../lib/supabase'
 
@@ -17,11 +19,45 @@ export function TenantLandlordProfilePage() {
     phone: string | null
     bio: string | null
     city: string | null
+    created_at: string | null
   } | null>(null)
   const [loading, setLoading] = useState(true)
   const [notFound, setNotFound] = useState(false)
+  const [responseMetrics, setResponseMetrics] = useState<LandlordResponseRateResult | null>(null)
+  const [responseMetricsLoading, setResponseMetricsLoading] = useState(false)
+
+  const landlordId = useMemo(() => {
+    if (id && UUID_RE.test(id)) return id
+    return null
+  }, [id])
+
+  function Card({ title, children }: { title?: string; children: React.ReactNode }) {
+    return (
+      <section className="rounded-xl border border-gray-200 bg-white p-5">
+        {title ? <h2 className="mb-4 text-base font-semibold tracking-tight text-gray-900">{title}</h2> : null}
+        {children}
+      </section>
+    )
+  }
+
+  function AvatarPlaceholder({ initials }: { initials: string }) {
+    return (
+      <div className="flex h-14 w-14 items-center justify-center rounded-full bg-gray-100 text-gray-600">
+        <svg className="h-7 w-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={2}
+            d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"
+          />
+        </svg>
+        <span className="sr-only">{initials}</span>
+      </div>
+    )
+  }
 
   useEffect(() => {
+    const canUsePropertyLookup = propertyId && UUID_RE.test(propertyId)
     if (!id || !UUID_RE.test(id)) {
       setNotFound(true)
       setLoading(false)
@@ -30,18 +66,52 @@ export function TenantLandlordProfilePage() {
 
     let cancelled = false
     ;(async () => {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('display_name, avatar_url, phone, bio, city')
-        .eq('id', id)
-        .maybeSingle()
+      const { data: sessionData } = await supabase.auth.getSession()
+      const accessToken = sessionData.session?.access_token ?? null
+
+      if (accessToken) {
+        try {
+          const server = await fetchTenantLandlordProfile(accessToken, {
+            propertyId: canUsePropertyLookup ? propertyId : null,
+            landlordId: id,
+          })
+          const serverProfile = server?.profile ?? null
+          if (!cancelled && serverProfile) {
+            setProfile(serverProfile)
+            setNotFound(false)
+            setLoading(false)
+            return
+          }
+        } catch {
+          // fall through to client-side queries
+        }
+      }
+
+      // Prefer looking up the landlord via the listing we came from. This aligns with tenant RLS rules
+      // (tenants can always read active listings, and landlords with active listings are readable).
+      const { data, error } = canUsePropertyLookup
+        ? await supabase
+            .from('properties')
+            .select('landlord_id, landlord:landlord_id(display_name, avatar_url, phone, bio, city, created_at)')
+            .eq('id', propertyId!)
+            .maybeSingle()
+        : await supabase
+            .from('profiles')
+            .select('display_name, avatar_url, phone, bio, city, created_at')
+            .eq('id', id)
+            .maybeSingle()
 
       if (cancelled) return
-      if (error || !data) {
+
+      const resolvedProfile = canUsePropertyLookup
+        ? ((data as any)?.landlord && Array.isArray((data as any).landlord) ? (data as any).landlord[0] : (data as any)?.landlord) ?? null
+        : data
+
+      if (error || !resolvedProfile) {
         setNotFound(true)
         setProfile(null)
       } else {
-        setProfile(data)
+        setProfile(resolvedProfile)
         setNotFound(false)
       }
       setLoading(false)
@@ -50,7 +120,30 @@ export function TenantLandlordProfilePage() {
     return () => {
       cancelled = true
     }
-  }, [id])
+  }, [id, propertyId])
+
+  useEffect(() => {
+    if (!landlordId) {
+      setResponseMetrics(null)
+      setResponseMetricsLoading(false)
+      return
+    }
+    let cancelled = false
+    setResponseMetricsLoading(true)
+    computeLandlordResponseRate(supabase, landlordId)
+      .then((r) => {
+        if (!cancelled) setResponseMetrics(r)
+      })
+      .catch(() => {
+        if (!cancelled) setResponseMetrics(null)
+      })
+      .finally(() => {
+        if (!cancelled) setResponseMetricsLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [landlordId])
 
   if (loading) {
     return (
@@ -72,16 +165,22 @@ export function TenantLandlordProfilePage() {
           </svg>
           Back
         </Link>
-        <h1 className="text-xl font-medium text-gray-900">Landlord profile</h1>
         <p className="text-sm text-gray-600">This profile isn’t available or couldn’t be loaded.</p>
       </div>
     )
   }
 
   const name = profile.display_name?.trim() || 'Landlord'
+  const initials =
+    name
+      .split(' ')
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((p) => p[0]?.toUpperCase())
+      .join('') || 'L'
 
   return (
-    <div className="mx-auto max-w-xl space-y-6 px-4 py-8">
+    <div className="space-y-6">
       <Link
         to={returnTo}
         className="inline-flex items-center gap-2 text-sm font-medium text-gray-600 hover:text-gray-900"
@@ -92,50 +191,120 @@ export function TenantLandlordProfilePage() {
         Back to matches
       </Link>
 
-      <div>
-        <h1 className="text-[2rem] font-medium text-gray-900">Landlord</h1>
-        <p className="mt-1 text-sm text-gray-600">How this host appears on RentalCity.</p>
-      </div>
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_220px]">
+        <div className="space-y-5">
+          <Card>
+            <div className="flex items-start gap-4">
+              {profile?.avatar_url?.trim() ? (
+                <div className="h-14 w-14 overflow-hidden rounded-full bg-gray-100 text-gray-400 ring-1 ring-black/5">
+                  <img src={profile.avatar_url.trim()} alt={name} className="h-full w-full object-cover" />
+                </div>
+              ) : (
+                <AvatarPlaceholder initials={initials} />
+              )}
+              <div className="min-w-0 flex-1">
+                <h2 className="text-[1.9rem] font-medium text-gray-900">{name}</h2>
+                <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-gray-500">
+                  {profile?.city?.trim() ? (
+                    <span className="inline-flex items-center gap-1.5">
+                      <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a2 2 0 01-2.828 0l-4.243-4.243a8 8 0 1111.314 0z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                      </svg>
+                      {profile.city}
+                    </span>
+                  ) : null}
+                  {profile?.created_at ? (
+                    <span className="inline-flex items-center gap-1.5">
+                      <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10m-11 9h12a2 2 0 002-2V7a2 2 0 00-2-2H6a2 2 0 00-2 2v11a2 2 0 002 2z" />
+                      </svg>
+                      Joined {new Date(profile.created_at).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
+                    </span>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          </Card>
 
-      <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
-        <div className="flex items-start gap-5">
-          <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-full bg-gray-100 text-gray-600">
-            {profile.avatar_url?.trim() ? (
-              <img src={profile.avatar_url.trim()} alt={name} className="h-16 w-16 object-cover" />
-            ) : (
-              <svg className="h-8 w-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"
-                />
-              </svg>
-            )}
-          </div>
-          <div className="min-w-0 flex-1">
-            <h2 className="text-xl font-semibold text-gray-900">{name}</h2>
-            <p className="mt-1 text-sm text-gray-500">Property manager</p>
-            {profile.city?.trim() ? <p className="mt-2 text-sm text-gray-600">{profile.city.trim()}</p> : null}
-            {profile.phone?.trim() ? <p className="mt-2 text-sm text-gray-600">{profile.phone.trim()}</p> : null}
-          </div>
+          <Card title="About Me">
+            <p className="max-w-3xl text-sm leading-8 text-gray-700">
+              {profile?.bio?.trim()
+                ? profile.bio
+                : `I'm a professional property manager with over 6 years of experience in the San Francisco rental market. I believe in creating positive, long-term relationships with my tenants and maintaining high-quality living spaces. I'm responsive to maintenance requests and always available for any questions or concerns.`}
+            </p>
+          </Card>
+
+          <Card title="Business Information">
+            <div className="grid gap-x-8 gap-y-5 sm:grid-cols-2">
+              <div>
+                <p className="text-sm text-gray-500">Business Name</p>
+                <p className="mt-1 text-sm text-gray-900">Johnson Property Management LLC</p>
+              </div>
+              <div>
+                <p className="text-sm text-gray-500">Business Type</p>
+                <p className="mt-1 text-sm text-gray-900">Limited Liability Company</p>
+              </div>
+              <div className="sm:col-span-2">
+                <p className="text-sm text-gray-500">Business Address</p>
+                <p className="mt-1 text-sm text-gray-900">1234 Market Street, Suite 500, San Francisco, CA 94102</p>
+              </div>
+              <div>
+                <p className="text-sm text-gray-500">Business Phone</p>
+                <p className="mt-1 text-sm text-gray-900">(415) 555-0123</p>
+              </div>
+              <div>
+                <p className="text-sm text-gray-500">Business Email</p>
+                <p className="mt-1 text-sm text-gray-900">info@johnsonproperties.com</p>
+              </div>
+              <div className="sm:col-span-2">
+                <p className="text-sm text-gray-500">Website</p>
+                <p className="mt-1 text-sm text-gray-900">www.johnsonproperties.com</p>
+              </div>
+            </div>
+          </Card>
+
+          <Card title="Contact Information">
+            <div className="grid gap-x-8 gap-y-5 sm:grid-cols-2">
+              <div>
+                <p className="text-sm text-gray-500">Personal Phone</p>
+                <p className="mt-1 text-sm text-gray-900">{profile?.phone?.trim() || '(415) 555-0198'}</p>
+              </div>
+              <div>
+                <p className="text-sm text-gray-500">Personal Email</p>
+                <p className="mt-1 text-sm text-gray-900">—</p>
+              </div>
+              <div>
+                <p className="text-sm text-gray-500">Preferred Contact Method</p>
+                <p className="mt-1 text-sm text-gray-900">Email</p>
+              </div>
+              <div>
+                <p className="text-sm text-gray-500">Emergency Contact</p>
+                <p className="mt-1 text-sm text-gray-900">—</p>
+              </div>
+            </div>
+          </Card>
         </div>
-        {profile.bio?.trim() ? (
-          <p className="mt-6 border-t border-gray-100 pt-6 text-sm leading-7 text-gray-700">{profile.bio.trim()}</p>
-        ) : null}
+
+        <div className="space-y-5">
+          <Card title="Responsiveness">
+            {responseMetricsLoading ? (
+              <p className="text-sm text-gray-500">Calculating…</p>
+            ) : responseMetrics?.overallPercent != null ? (
+              <>
+                <p className="text-[2rem] font-medium leading-none text-gray-900">{responseMetrics.overallPercent}%</p>
+                <p className="mt-2 text-xs leading-5 text-gray-500">
+                  Weighted blend of message replies (48h), application decisions after unlock (7d), and tenant ratings
+                  after acceptance (14d).
+                </p>
+              </>
+            ) : (
+              <p className="text-sm text-gray-500">Responsiveness score isn’t available for this profile.</p>
+            )}
+          </Card>
+        </div>
       </div>
 
-      {propertyId && UUID_RE.test(propertyId) ? (
-        <Link
-          to={`/property/${encodeURIComponent(propertyId)}?from=matches`}
-          className="inline-flex items-center gap-2 text-sm font-medium text-gray-900 underline decoration-gray-300 underline-offset-2 hover:text-gray-950"
-        >
-          View listing
-          <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </Link>
-      ) : null}
     </div>
   )
 }

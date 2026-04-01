@@ -119,6 +119,11 @@ const migration22 = readFileSync(
   'utf-8'
 )
 
+const migration23 = readFileSync(
+  join(__dirname, '../supabase/migrations/20260401090000_background_checks_universal_screenings.sql'),
+  'utf-8'
+)
+
 const client = new pg.Client({ connectionString: dbUrl })
 
 async function run() {
@@ -194,6 +199,9 @@ async function run() {
     console.log('Running landlord universal application access expand...')
     await client.query(migration22)
     console.log('landlord universal application access expand OK')
+    console.log('Running universal application screenings...')
+    await client.query(migration23)
+    console.log('universal application screenings OK')
     console.log('Migrations complete.')
   } catch (err) {
     console.error('Migration failed:', err.message)

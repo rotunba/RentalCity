@@ -1421,7 +1421,7 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
                         </button>
                       ) : null}
                       {workflow === 'unlocked' ? (
-                        <>
+                        <div className="grid w-full grid-cols-2 gap-2">
                           <button
                             type="button"
                             onClick={() => handleLandlordCardApprove(match)}
@@ -1456,7 +1456,7 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
                               </>
                             )}
                           </button>
-                        </>
+                        </div>
                       ) : null}
                       {workflow === 'declined' ? (
                         <button
