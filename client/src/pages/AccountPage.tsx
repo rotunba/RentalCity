@@ -46,6 +46,9 @@ type ProfileRecord = {
   phone: string | null
   bio: string | null
   city: string | null
+  business_name?: string | null
+  landlord_property_count_range?: string | null
+  landlord_experience_level?: string | null
   created_at: string
 } | null
 
@@ -94,7 +97,7 @@ export function AccountPage() {
 
       const { data: profileData } = await supabase
         .from('profiles')
-        .select('display_name, avatar_url, phone, bio, city, created_at')
+        .select('display_name, avatar_url, phone, bio, city, created_at, business_name, landlord_property_count_range, landlord_experience_level')
         .eq('id', user.id)
         .maybeSingle()
 
@@ -191,6 +194,11 @@ export function AccountPage() {
   } = computeUniversalApplicationDisplay(universalApplication, now)
 
   if (profileRole === 'landlord') {
+    const missingBusinessInfo =
+      !profile?.business_name?.trim() ||
+      !profile?.landlord_property_count_range ||
+      !profile?.landlord_experience_level
+
     return (
       <div className="space-y-6">
         <div className="mb-6 flex items-start justify-between gap-4">
@@ -263,29 +271,39 @@ export function AccountPage() {
               <div className="grid gap-x-8 gap-y-5 sm:grid-cols-2">
                 <div>
                   <p className="text-sm text-gray-500">Business Name</p>
-                  <p className="mt-1 text-sm text-gray-900">Johnson Property Management LLC</p>
+                  <p className="mt-1 text-sm text-gray-900">
+                    {profile?.business_name?.trim() || '—'}
+                  </p>
                 </div>
                 <div>
-                  <p className="text-sm text-gray-500">Business Type</p>
-                  <p className="mt-1 text-sm text-gray-900">Limited Liability Company</p>
+                  <p className="text-sm text-gray-500">Properties managed</p>
+                  <p className="mt-1 text-sm text-gray-900">
+                    {profile?.landlord_property_count_range || '—'}
+                  </p>
                 </div>
                 <div className="sm:col-span-2">
-                  <p className="text-sm text-gray-500">Business Address</p>
-                  <p className="mt-1 text-sm text-gray-900">1234 Market Street, Suite 500, San Francisco, CA 94102</p>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-500">Business Phone</p>
-                  <p className="mt-1 text-sm text-gray-900">(415) 555-0123</p>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-500">Business Email</p>
-                  <p className="mt-1 text-sm text-gray-900">info@johnsonproperties.com</p>
-                </div>
-                <div className="sm:col-span-2">
-                  <p className="text-sm text-gray-500">Website</p>
-                  <p className="mt-1 text-sm text-gray-900">www.johnsonproperties.com</p>
+                  <p className="text-sm text-gray-500">Landlord experience</p>
+                  <p className="mt-1 text-sm text-gray-900">
+                    {profile?.landlord_experience_level || '—'}
+                  </p>
                 </div>
               </div>
+              {missingBusinessInfo ? (
+                <div className="mt-5 rounded-lg border border-dashed border-gray-200 bg-gray-50/70 p-4">
+                  <p className="text-sm text-gray-700">
+                    Finish your business details to build trust with tenants and improve match quality.
+                  </p>
+                  <Link
+                    to="/account/edit"
+                    className="mt-3 inline-flex items-center gap-2 rounded-lg bg-gray-900 px-4 py-2.5 text-sm font-medium text-white hover:bg-gray-800"
+                  >
+                    Complete business info
+                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    </svg>
+                  </Link>
+                </div>
+              ) : null}
             </Card>
 
             <Card title="Contact Information">
@@ -310,6 +328,21 @@ export function AccountPage() {
             </Card>
 
             <LandlordRatingsGivenCard />
+
+            <Card title="Match Preferences">
+              <p className="text-sm text-gray-600">
+                Update the survey answers we use to match your listings with tenants.
+              </p>
+              <Link
+                to="/onboarding/survey?mode=edit"
+                className="mt-4 inline-flex items-center gap-2 rounded-lg bg-gray-900 px-4 py-2.5 text-sm font-medium text-white hover:bg-gray-800"
+              >
+                Edit survey
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+              </Link>
+            </Card>
 
             <LandlordInviteTenantsCard />
           </div>
@@ -532,6 +565,60 @@ export function AccountPage() {
                 </Link>
               </div>
             )}
+          </Card>
+
+          <Card title="Income">
+            {typeof questionnaireAnswers?.monthly_income === 'number' && questionnaireAnswers.monthly_income > 0 ? (
+              <div>
+                <div>
+                  <p className="text-sm text-gray-500">Monthly income</p>
+                  <p className="mt-1 text-sm text-gray-900">
+                    {new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(
+                      questionnaireAnswers.monthly_income,
+                    )}
+                  </p>
+                </div>
+                <Link
+                  to="/account/edit/income"
+                  className="mt-4 inline-flex items-center gap-2 rounded-lg bg-gray-900 px-4 py-2.5 text-sm font-medium text-white hover:bg-gray-800"
+                >
+                  Edit
+                  <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
+                </Link>
+              </div>
+            ) : (
+              <div>
+                <p className="text-sm text-gray-500">
+                  Add your monthly income to improve affordability matching.
+                </p>
+                <Link
+                  to="/account/edit/income"
+                  className="mt-3 inline-flex items-center gap-2 rounded-lg bg-gray-900 px-4 py-2.5 text-sm font-medium text-white hover:bg-gray-800"
+                >
+                  Add income
+                  <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
+                </Link>
+              </div>
+            )}
+          </Card>
+
+          <Card title="Tenant Questionnaire">
+            <p className="text-sm text-gray-500">
+              Update the answers we use for match scoring (including lifestyle and policy fit).
+            </p>
+            <Link
+              to="/tenant-questionnaire"
+              className="mt-3 inline-flex items-center gap-2 rounded-lg bg-gray-900 px-4 py-2.5 text-sm font-medium text-white hover:bg-gray-800"
+            >
+              Edit questionnaire
+              <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+              </svg>
+            </Link>
           </Card>
 
           <Card title="Lease Preferences">

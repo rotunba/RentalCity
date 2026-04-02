@@ -12,6 +12,9 @@ type ProfileRecord = {
   phone: string | null
   bio: string | null
   city: string | null
+  business_name?: string | null
+  landlord_property_count_range?: string | null
+  landlord_experience_level?: string | null
   role?: string | null
 } | null
 
@@ -65,6 +68,8 @@ export function EditProfilePage() {
   const [lastName, setLastName] = useState('')
   const [location, setLocation] = useState('')
   const [businessName, setBusinessName] = useState('')
+  const [propertyCount, setPropertyCount] = useState('')
+  const [experienceLevel, setExperienceLevel] = useState('')
   const [businessType, setBusinessType] = useState('')
   const [businessAddress, setBusinessAddress] = useState('')
   const [businessPhone, setBusinessPhone] = useState('')
@@ -82,7 +87,7 @@ export function EditProfilePage() {
 
       const { data } = await supabase
         .from('profiles')
-        .select('display_name, avatar_url, phone, bio, city')
+        .select('display_name, avatar_url, phone, bio, city, business_name, landlord_property_count_range, landlord_experience_level')
         .eq('id', user.id)
         .maybeSingle()
 
@@ -93,6 +98,9 @@ export function EditProfilePage() {
       setCity(data?.city?.trim() || '')
       setLocation(data?.city?.trim() || '')
       setLandlordBio(data?.bio?.trim() || '')
+      setBusinessName((data as any)?.business_name?.trim?.() ? (data as any).business_name.trim() : (data as any)?.business_name || '')
+      setPropertyCount((data as any)?.landlord_property_count_range || '')
+      setExperienceLevel((data as any)?.landlord_experience_level || '')
     }
 
     loadProfile()
@@ -168,6 +176,11 @@ export function EditProfilePage() {
       phone: phoneNumber.trim() || null,
       bio: (profileRole === 'tenant' ? bio : landlordBio).trim() || null,
       city: (profileRole === 'tenant' ? city : location).trim() || null,
+    }
+    if (profileRole === 'landlord') {
+      payload.business_name = businessName.trim() || null
+      payload.landlord_property_count_range = propertyCount || null
+      payload.landlord_experience_level = experienceLevel || null
     }
     const { error: updateError } = await supabase
       .from('profiles')
@@ -279,6 +292,24 @@ export function EditProfilePage() {
                     <Field label="Business Name">
                       <TextInput value={businessName} onChange={(e) => setBusinessName(e.target.value)} />
                     </Field>
+                    <Field label="Properties managed">
+                      <div className="relative">
+                        <select
+                          value={propertyCount}
+                          onChange={(e) => setPropertyCount(e.target.value)}
+                          className="h-11 w-full appearance-none rounded-lg border border-gray-300 bg-white px-4 pr-10 text-sm text-gray-900 outline-none transition focus:border-gray-500 focus:ring-2 focus:ring-gray-200"
+                        >
+                          <option value="">Select</option>
+                          <option value="1">1 property</option>
+                          <option value="2-5">2-5 properties</option>
+                          <option value="6-10">6-10 properties</option>
+                          <option value="10+">10+ properties</option>
+                        </select>
+                        <svg className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </div>
+                    </Field>
                     <Field label="Business Type">
                       <div className="relative">
                         <select
@@ -296,6 +327,25 @@ export function EditProfilePage() {
                       </div>
                     </Field>
                   </div>
+
+                  <Field label="Landlord experience">
+                    <div className="relative">
+                      <select
+                        value={experienceLevel}
+                        onChange={(e) => setExperienceLevel(e.target.value)}
+                        className="h-11 w-full appearance-none rounded-lg border border-gray-300 bg-white px-4 pr-10 text-sm text-gray-900 outline-none transition focus:border-gray-500 focus:ring-2 focus:ring-gray-200"
+                      >
+                        <option value="">Select</option>
+                        <option value="new">Less than 1 year</option>
+                        <option value="1-3">1-3 years</option>
+                        <option value="4-7">4-7 years</option>
+                        <option value="8+">8+ years</option>
+                      </select>
+                      <svg className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </div>
+                  </Field>
 
                   <Field label="Business Address">
                     <TextInput value={businessAddress} onChange={(e) => setBusinessAddress(e.target.value)} />

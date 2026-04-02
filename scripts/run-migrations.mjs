@@ -124,6 +124,11 @@ const migration23 = readFileSync(
   'utf-8'
 )
 
+const migration24 = readFileSync(
+  join(__dirname, '../supabase/migrations/20260401113000_landlord_profile_business_fields.sql'),
+  'utf-8'
+)
+
 const client = new pg.Client({ connectionString: dbUrl })
 
 async function run() {
@@ -202,6 +207,9 @@ async function run() {
     console.log('Running universal application screenings...')
     await client.query(migration23)
     console.log('universal application screenings OK')
+    console.log('Running landlord profile business fields...')
+    await client.query(migration24)
+    console.log('landlord profile business fields OK')
     console.log('Migrations complete.')
   } catch (err) {
     console.error('Migration failed:', err.message)

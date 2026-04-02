@@ -12,6 +12,7 @@ import { EditProfilePage } from './pages/EditProfilePage'
 import { EditBioPage } from './pages/EditBioPage'
 import { EditRentalHistoryPage } from './pages/EditRentalHistoryPage'
 import { EditEmploymentHistoryPage } from './pages/EditEmploymentHistoryPage'
+import { EditIncomePage } from './pages/EditIncomePage'
 import { EditLeasePreferencesPage } from './pages/EditLeasePreferencesPage'
 import { LegalPage } from './pages/LegalPage'
 import { PaymentMethodPage } from './pages/PaymentMethodPage'
@@ -59,6 +60,7 @@ import { RentalApplicationPage } from './pages/RentalApplicationPage'
 import { TenantInviteLandingPage } from './pages/TenantInviteLandingPage'
 import { TenantAccountReviewsPage } from './pages/TenantAccountReviewsPage'
 import { LandlordRatingsGivenPage } from './pages/LandlordRatingsGivenPage'
+import { LandlordRatingsReceivedPage } from './pages/LandlordRatingsReceivedPage'
 
 export default function App() {
   const { user, loading } = useAuth()
@@ -80,6 +82,7 @@ export default function App() {
         <Route path="matches/tenant/:id/reviews" element={user ? <LandlordTenantReviewsPage /> : <Navigate to="/login" replace />} />
         <Route path="matches/tenant/:id" element={user ? <LandlordTenantProfilePage /> : <Navigate to="/login" replace />} />
         <Route path="matches/landlord/:id" element={user ? <TenantLandlordProfilePage /> : <Navigate to="/login" replace />} />
+        <Route path="matches/landlord/:id/ratings" element={user ? <LandlordRatingsReceivedPage /> : <Navigate to="/login" replace />} />
         <Route path="rental-needs" element={user ? <RentalNeedsPage /> : <Navigate to="/login" replace />} />
         <Route path="lease-preferences" element={user ? <LeasePreferencesPage /> : <Navigate to="/login" replace />} />
         <Route path="tenant-questionnaire" element={user ? <TenantQuestionnairePage /> : <Navigate to="/login" replace />} />
@@ -101,6 +104,7 @@ export default function App() {
         <Route path="account/edit/bio" element={user ? <EditBioPage /> : <Navigate to="/login" replace />} />
         <Route path="account/edit/rental-history" element={user ? <EditRentalHistoryPage /> : <Navigate to="/login" replace />} />
         <Route path="account/edit/employment" element={user ? <EditEmploymentHistoryPage /> : <Navigate to="/login" replace />} />
+        <Route path="account/edit/income" element={user ? <EditIncomePage /> : <Navigate to="/login" replace />} />
         <Route path="account/edit/lease-preferences" element={user ? <EditLeasePreferencesPage /> : <Navigate to="/login" replace />} />
         <Route path="account/profile-preview" element={user ? <LandlordProfilePreviewPage /> : <Navigate to="/login" replace />} />
         <Route path="account/settings" element={user ? <AccountSettingsPage /> : <Navigate to="/login" replace />} />

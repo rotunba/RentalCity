@@ -84,6 +84,11 @@ export function AddPropertyPreviewPage() {
     setSubmitting(true)
 
     const photosToUse = photosFromState && photosFromState.length > 0 ? photosFromState : draft.photos
+    if (status === 'active' && photosToUse.length === 0) {
+      setError('To publish, add at least one property photo.')
+      setSubmitting(false)
+      return
+    }
     const photoLabels = photosToUse.map((p) => p.label)
     let photoUrls: string[] = []
 
@@ -105,6 +110,11 @@ export function AddPropertyPreviewPage() {
         const { data: urlData } = supabase.storage.from(PROPERTY_IMAGES_BUCKET).getPublicUrl(path)
         photoUrls.push(urlData.publicUrl)
       }
+    }
+    if (status === 'active' && photoUrls.length === 0) {
+      setError('To publish, upload at least one property photo.')
+      setSubmitting(false)
+      return
     }
 
     const { data, error: insertError } = await supabase

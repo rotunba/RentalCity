@@ -93,7 +93,16 @@ export function ProfileCreationPage() {
     setLoading(true)
     await supabase
       .from('profiles')
-      .update({ display_name: fullName.trim() || null })
+      .update({
+        display_name: fullName.trim() || null,
+        ...(profileRole === 'landlord'
+          ? {
+              business_name: businessName.trim() || null,
+              landlord_property_count_range: propertyCount || null,
+              landlord_experience_level: experienceLevel || null,
+            }
+          : {}),
+      })
       .eq('id', user.id)
     setLoading(false)
     navigate(profileRole === 'landlord' ? '/onboarding/survey/intro' : '/')

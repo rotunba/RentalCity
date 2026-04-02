@@ -319,6 +319,29 @@ export function LandlordPropertyDetailsPage() {
       statusOverride ??
       (formState.listingStatus.toLowerCase() as 'draft' | 'active' | 'inactive' | 'leased')
 
+    if (status === 'active') {
+      const requiredMissing =
+        !formState.addressLine1.trim() ||
+        !formState.neighborhood.trim() ||
+        !formState.stateCode.trim() ||
+        !formState.zipCode.trim() ||
+        !formState.monthlyRent.trim() ||
+        !formState.bedrooms.trim() ||
+        !formState.bathrooms.trim()
+      const hasAnyPhoto = photoItems.some((p) => Boolean(p.url || p.file))
+
+      if (requiredMissing) {
+        setError('To publish, complete address, rent, beds, and baths.')
+        setSaving(false)
+        return
+      }
+      if (!hasAnyPhoto) {
+        setError('To publish, add at least one property photo.')
+        setSaving(false)
+        return
+      }
+    }
+
     const photoLabels = photoItems.map((p) => p.label)
     const photoUrls: string[] = []
 

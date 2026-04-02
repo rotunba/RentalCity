@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
+import { LandlordRatingsGivenPublicCard } from '../components/LandlordRatingsGivenPublicCard'
 import { computeLandlordResponseRate, type LandlordResponseRateResult } from '../lib/landlordResponseRate'
 import { fetchTenantLandlordProfile } from '../lib/landlordProfileApi'
 import { safeInternalPath } from '../lib/safeInternalPath'
@@ -272,7 +273,7 @@ export function TenantLandlordProfilePage() {
               </div>
               <div>
                 <p className="text-sm text-gray-500">Personal Email</p>
-                <p className="mt-1 text-sm text-gray-900">—</p>
+                <p className="mt-1 text-sm text-gray-900">sarah.johnson@email.com</p>
               </div>
               <div>
                 <p className="text-sm text-gray-500">Preferred Contact Method</p>
@@ -280,10 +281,12 @@ export function TenantLandlordProfilePage() {
               </div>
               <div>
                 <p className="text-sm text-gray-500">Emergency Contact</p>
-                <p className="mt-1 text-sm text-gray-900">—</p>
+                <p className="mt-1 text-sm text-gray-900">Michael Johnson - (415) 555-0199</p>
               </div>
             </div>
           </Card>
+
+          {landlordId ? <LandlordRatingsGivenPublicCard landlordId={landlordId} /> : null}
         </div>
 
         <div className="space-y-5">

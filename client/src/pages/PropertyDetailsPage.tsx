@@ -14,6 +14,8 @@ type PropertyDetails = {
   landlordName: string
   amenities: string[]
   leaseDetails: Array<{ label: string; value: string }>
+  photoUrls: string[]
+  photoLabels: string[]
 }
 
 const AMENITY_LABELS: Record<string, string> = {
@@ -135,6 +137,8 @@ export function PropertyDetailsPage() {
           available_from,
           lease_term,
           amenities,
+          photo_urls,
+          photo_labels,
           landlord:profiles(display_name)
         `)
         .eq('id', id)
@@ -169,6 +173,8 @@ export function PropertyDetailsPage() {
         available_from?: string
         lease_term?: string
         amenities?: string[]
+        photo_urls?: string[] | null
+        photo_labels?: string[] | null
         landlord?: { display_name?: string } | null
       }
 
@@ -193,6 +199,9 @@ export function PropertyDetailsPage() {
         leaseDetails.push({ label: 'Application Fee', value: '$50' })
       }
 
+      const photoUrls = Array.isArray(row.photo_urls) ? row.photo_urls.map((u) => String(u)).filter(Boolean) : []
+      const photoLabels = Array.isArray(row.photo_labels) ? row.photo_labels.map((l) => String(l)) : []
+
       setProperty({
         id: row.id,
         title,
@@ -204,6 +213,8 @@ export function PropertyDetailsPage() {
         landlordName: row.landlord?.display_name ?? 'Landlord',
         amenities: amenities.length > 0 ? amenities : ['See listing for details'],
         leaseDetails,
+        photoUrls,
+        photoLabels,
       })
     }
 
@@ -225,6 +236,50 @@ export function PropertyDetailsPage() {
           ← {fromMatches ? 'Back to Matches' : 'Back to Browse Rentals'}
         </Link>
         <p className="py-8 text-sm text-red-600">{error ?? 'Property not found'}</p>
+      </div>
+    )
+  }
+
+  function PropertyHeroPhoto({
+    url,
+    alt,
+  }: {
+    url: string | null
+    alt: string
+  }) {
+    const [broken, setBroken] = useState(false)
+    const show = Boolean(url) && !broken
+    return (
+      <div className="overflow-hidden rounded-xl bg-gray-100 aspect-[16/8]">
+        {show ? (
+          <img
+            src={url as string}
+            alt={alt}
+            className="h-full w-full object-cover"
+            loading="eager"
+            onError={() => setBroken(true)}
+          />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center">
+            <span className="text-lg text-gray-500">No photos yet</span>
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  function PropertyThumb({ url, alt }: { url: string; alt: string }) {
+    const [broken, setBroken] = useState(false)
+    if (broken) return null
+    return (
+      <div className="aspect-[6/3.5] overflow-hidden rounded-lg bg-gray-100">
+        <img
+          src={url}
+          alt={alt}
+          className="h-full w-full object-cover"
+          loading="lazy"
+          onError={() => setBroken(true)}
+        />
       </div>
     )
   }
@@ -264,20 +319,22 @@ export function PropertyDetailsPage() {
             </div>
           </div>
 
-          <div className="rounded-xl bg-gray-200 aspect-[16/8] flex items-center justify-center">
-            <span className="text-lg text-white/90">Main Property Photo</span>
-          </div>
+          <PropertyHeroPhoto
+            url={property.photoUrls[0] ?? null}
+            alt={property.photoLabels[0] || 'Main property photo'}
+          />
 
-          <div className="grid grid-cols-5 gap-2">
-            {['Photo 1', 'Photo 2', 'Photo 3', 'Photo 4', 'Photo 5'].map((label) => (
-              <div
-                key={label}
-                className="flex aspect-[6/3.5] items-center justify-center rounded-lg bg-gray-200 text-xs text-white/90"
-              >
-                {label}
-              </div>
-            ))}
-          </div>
+          {property.photoUrls.length > 1 ? (
+            <div className="grid grid-cols-5 gap-2">
+              {property.photoUrls.slice(0, 5).map((url, idx) => (
+                <PropertyThumb
+                  key={`${url}-${idx}`}
+                  url={url}
+                  alt={property.photoLabels[idx] || `Property photo ${idx + 1}`}
+                />
+              ))}
+            </div>
+          ) : null}
         </div>
 
         <div className="space-y-4">

@@ -75,49 +75,35 @@ export function UniversalApplicationPage() {
     }
     setLoading(true)
     try {
-      // TODO: call backend to create payment intent / record when Stripe is integrated
-      await new Promise((r) => setTimeout(r, 800))
-
-      // Simulate successful payment by creating a new active universal application window.
-      const now = new Date()
-      const validUntil = new Date(now)
-      validUntil.setMonth(validUntil.getMonth() + 6)
-
-      // Expire any currently-active universal application so there's only one active window at a time.
-      await supabase
-        .from('universal_applications')
-        .update({ status: 'expired' })
-        .eq('tenant_id', user.id)
-        .eq('status', 'active')
-
-      const validUntilIso = validUntil.toISOString()
-      const { data: inserted, error: insertError } = await supabase
-        .from('universal_applications')
-        .insert({
-        tenant_id: user.id,
-        status: 'active',
-        valid_until: validUntilIso,
-      })
-        .select('id')
-        .maybeSingle()
-
-      if (insertError) {
-        throw insertError
+      const { data: session } = await supabase.auth.getSession()
+      const accessToken = session.session?.access_token
+      if (!accessToken) {
+        setError('Your session expired. Please sign in again.')
+        return
       }
 
-      const universalApplicationId = (inserted as { id?: string } | null)?.id
+      const res = await fetch('/api/universal-applications/activate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ tenantId: user.id }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error((err as { error?: string }).error || 'Checkout failed. Please try again.')
+      }
+      const json = (await res.json()) as { universalApplicationId?: string | null }
+      const universalApplicationId = json.universalApplicationId ?? null
       if (universalApplicationId) {
-        const { data: session } = await supabase.auth.getSession()
-        const accessToken = session.session?.access_token
-        if (accessToken) {
-          // Fire-and-forget: create/reuse screening row for this application window.
-          startUniversalBackgroundCheck(accessToken, universalApplicationId).catch(() => {})
-        }
+        // Fire-and-forget: create/reuse screening row for this application window.
+        startUniversalBackgroundCheck(accessToken, universalApplicationId).catch(() => {})
       }
 
       navigate('/account/rental-application', { replace: true })
     } catch (err) {
-      setError('Something went wrong. Please try again.')
+      setError(err instanceof Error ? err.message : 'Something went wrong. Please try again.')
     } finally {
       setLoading(false)
     }

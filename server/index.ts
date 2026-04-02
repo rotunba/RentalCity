@@ -374,6 +374,77 @@ app.get('/api/tenant/landlord-profile', async (req, res) => {
 })
 
 /**
+ * Activate (or renew) a tenant universal application window.
+ * Server-backed so the client isn't "simulating" checkout.
+ *
+ * Note: payment provider integration can replace the "succeeded" write below later.
+ */
+app.post('/api/universal-applications/activate', async (req, res) => {
+  const admin = getSupabaseAdmin()
+  if (!admin) return res.status(500).json({ error: 'Server configuration error' })
+  const token = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null
+  const user = await authUser(token)
+  if (!user) return res.status(401).json({ error: 'Authentication required' })
+
+  const { tenantId } = req.body as { tenantId?: string }
+  if (!tenantId || tenantId !== user.id) {
+    return res.status(400).json({ error: 'Invalid request: tenantId must match authenticated user' })
+  }
+
+  const nowIso = new Date().toISOString()
+  const { data: active } = await admin
+    .from('universal_applications')
+    .select('id')
+    .eq('tenant_id', tenantId)
+    .eq('status', 'active')
+    .gt('valid_until', nowIso)
+    .limit(1)
+
+  const hasExisting = (active ?? []).length > 0
+  const applicationFeeCents = hasExisting ? 5000 : 12500
+
+  // Record a successful payment event (no Stripe yet).
+  const { error: paymentError } = await admin.from('payments').insert({
+    application_id: null,
+    stripe_payment_intent_id: null,
+    amount_cents: applicationFeeCents,
+    currency: 'usd',
+    status: 'succeeded',
+    payer_id: tenantId,
+    description: hasExisting ? 'Universal application renewal' : 'Universal application activation',
+  })
+  if (paymentError) return res.status(500).json({ error: paymentError.message })
+
+  // Expire any currently-active universal application so there's only one active window at a time.
+  const { error: expireError } = await admin
+    .from('universal_applications')
+    .update({ status: 'expired' })
+    .eq('tenant_id', tenantId)
+    .eq('status', 'active')
+  if (expireError) return res.status(500).json({ error: expireError.message })
+
+  const now = new Date()
+  const validUntil = new Date(now)
+  validUntil.setMonth(validUntil.getMonth() + 6)
+  const validUntilIso = validUntil.toISOString()
+
+  const { data: inserted, error: insertError } = await admin
+    .from('universal_applications')
+    .insert({
+      tenant_id: tenantId,
+      status: 'active',
+      valid_until: validUntilIso,
+    })
+    .select('id')
+    .maybeSingle()
+
+  if (insertError) return res.status(500).json({ error: insertError.message })
+
+  const universalApplicationId = (inserted as { id?: string } | null)?.id ?? null
+  return res.json({ universalApplicationId, applicationFeeCents, hasExisting })
+})
+
+/**
  * Start (or reuse) a BackgroundChecks.com order for the tenant's latest universal application window.
  * Returns the report_key (used by the applicant form widget).
  */

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { deriveLandlordPreferences } from '../lib/landlordPreferences'
 import { landlordQuestions } from '../lib/landlordQuestionnaire'
 import { useAuth } from '../lib/useAuth'
@@ -84,6 +84,8 @@ export function CompatibilitySurveyPage() {
   const { user } = useAuth()
   const navigate = useNavigate()
   const { role: profileRole, landlordSurveyCompletedAt, loading: roleLoading } = useProfileRole(user)
+  const [searchParams] = useSearchParams()
+  const isEditMode = searchParams.get('mode') === 'edit'
   const [step, setStep] = useState(1)
   const [answers, setAnswers] = useState<Record<string, string | string[]>>({})
   const [completeError, setCompleteError] = useState<string | null>(null)
@@ -91,7 +93,7 @@ export function CompatibilitySurveyPage() {
   useEffect(() => {
     if (roleLoading || profileRole === null) return
     if (profileRole === 'landlord') {
-      if (landlordSurveyCompletedAt) {
+      if (landlordSurveyCompletedAt && !isEditMode) {
         navigate('/onboarding/property/intro', { replace: true })
       }
       return
@@ -100,7 +102,21 @@ export function CompatibilitySurveyPage() {
     if (profileRole === 'tenant') {
       navigate('/lease-preferences', { replace: true })
     }
-  }, [roleLoading, profileRole, landlordSurveyCompletedAt, navigate])
+  }, [roleLoading, profileRole, landlordSurveyCompletedAt, navigate, isEditMode])
+
+  useEffect(() => {
+    if (!user || roleLoading || profileRole !== 'landlord') return
+    supabase
+      .from('landlord_questionnaire')
+      .select('answers')
+      .eq('user_id', user.id)
+      .maybeSingle()
+      .then(({ data }) => {
+        if (data?.answers && typeof data.answers === 'object') {
+          setAnswers(data.answers as Record<string, string | string[]>)
+        }
+      })
+  }, [user, roleLoading, profileRole])
 
   if (roleLoading || profileRole === null) {
     return (

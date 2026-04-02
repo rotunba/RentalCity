@@ -30,6 +30,8 @@ type MatchCard = {
   amenitiesList: string[]
   landlordId: string
   landlordDisplayName: string | null
+  photoUrl: string | null
+  photoAlt: string
 }
 
 type ProfileRole = 'tenant' | 'landlord'
@@ -78,6 +80,28 @@ function formatRelativeTime(createdAt: string) {
   if (diffDays === 1) return 'Applied 1 day ago'
   if (diffDays < 7) return `Applied ${diffDays} days ago`
   return `Applied ${Math.floor(diffDays / 7)} weeks ago`
+}
+
+function MatchCardPhoto({ url, alt }: { url: string | null; alt: string }) {
+  const [broken, setBroken] = useState(false)
+  const show = Boolean(url) && !broken
+  return (
+    <div className="mb-4 aspect-[16/7] overflow-hidden rounded-lg bg-gray-100">
+      {show ? (
+        <img
+          src={url as string}
+          alt={alt}
+          className="h-full w-full object-cover"
+          loading="lazy"
+          onError={() => setBroken(true)}
+        />
+      ) : (
+        <div className="flex h-full w-full items-center justify-center">
+          <span className="text-sm text-gray-500">No photos yet</span>
+        </div>
+      )}
+    </div>
+  )
 }
 
 /** Tenant `tenant_preferences.lease_length_months` — same shaping as Account lease duration. */
@@ -410,7 +434,7 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
     const { data, error } = await supabase
       .from('properties')
       .select(
-        'id, title, address_line1, city, state, bedrooms, bathrooms, amenities, monthly_rent_cents, landlord_id, landlord:landlord_id(display_name, avatar_url)',
+        'id, title, address_line1, city, state, bedrooms, bathrooms, amenities, monthly_rent_cents, landlord_id, photo_urls, photo_labels, landlord:landlord_id(display_name, avatar_url)',
       )
       .eq('status', 'active')
       .order('created_at', { ascending: false })
@@ -431,6 +455,8 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
       amenities: unknown
       monthly_rent_cents: number
       landlord_id: string
+      photo_urls?: string[] | null
+      photo_labels?: string[] | null
       landlord?: { display_name?: string | null; avatar_url?: string | null } | { display_name?: string | null; avatar_url?: string | null }[] | null
     }
 
@@ -454,6 +480,11 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
           amenitiesList: amenityList,
           landlordId: p.landlord_id,
           landlordDisplayName: landlord?.display_name?.trim() || null,
+          photoUrl: Array.isArray(p.photo_urls) && p.photo_urls.length > 0 ? String(p.photo_urls[0]) : null,
+          photoAlt:
+            Array.isArray(p.photo_labels) && p.photo_labels.length > 0
+              ? String(p.photo_labels[0] || 'Property photo')
+              : 'Property photo',
         }
       }),
     )
@@ -1775,7 +1806,12 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
               >
                 <div className="mb-4 flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <h3 className="font-semibold text-gray-900">{match.title}</h3>
+                    <Link
+                      to={`/property/${match.id}?from=matches`}
+                      className="font-semibold text-gray-900 hover:underline"
+                    >
+                      {match.title}
+                    </Link>
                     <p className="mt-1 text-[2rem] font-medium leading-none text-gray-900">{match.price}</p>
                     <p className="mt-2 text-sm text-gray-600">
                       Listed by{' '}
@@ -1808,9 +1844,7 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
                   </button>
                 </div>
 
-                <div className="mb-4 aspect-[16/7] rounded-lg bg-gray-200 flex items-center justify-center">
-                  <span className="text-sm text-gray-500">Property image</span>
-                </div>
+                <MatchCardPhoto url={match.photoUrl} alt={match.photoAlt} />
 
                 <div className="flex-1 flex flex-col">
                   {(() => {
@@ -1881,17 +1915,11 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
                       <button
                         type="button"
                         onClick={() => handleApplyNow(match)}
-                        className="flex-1 rounded-lg bg-gray-900 px-4 py-3 text-sm font-medium text-white hover:bg-gray-800"
+                        className="w-full rounded-lg bg-gray-900 px-4 py-3 text-sm font-medium text-white hover:bg-gray-800"
                       >
                         Apply Now
                       </button>
                     )}
-                    <Link
-                      to={`/property/${match.id}?from=matches`}
-                      className="flex-1 rounded-lg border border-gray-300 px-4 py-3 text-center text-sm font-medium text-gray-700 hover:bg-gray-50"
-                    >
-                      View Property
-                    </Link>
                   </div>
                   {isApplied && applicationIdByPropertyId[match.id] ? (
                     <Link
@@ -1935,13 +1963,13 @@ const { role: profileRole, displayName, landlordSurveyCompletedAt, tenantSurveyC
         </div>
       ) : null}
 
-      {profileRole === 'tenant' && tenantOverallScore != null && matchLoading && matchesToShow.length === 0 ? (
+      {profileRole === 'tenant' && tenantOverallScore != null && (loading || matchLoading) && matchesToShow.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 px-4 bg-white rounded-xl border border-gray-200">
           <p className="text-gray-600">Loading your matches…</p>
         </div>
       ) : null}
 
-      {!hasMatches && !(profileRole === 'tenant' && tenantOverallScore != null && matchLoading) ? (
+      {!hasMatches && !loading && !(profileRole === 'tenant' && tenantOverallScore != null && matchLoading) ? (
         <div className="flex flex-col items-center justify-center py-16 px-4 bg-white rounded-xl border border-gray-200">
           <div className="w-32 h-32 rounded-xl bg-gray-100 flex items-center justify-center mb-6">
             <svg className="w-16 h-16 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
